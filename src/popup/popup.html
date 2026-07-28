@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Night Neutralizer</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app" id="app">
+      <header class="header">
+        <div class="brand">
+          <span class="moon" aria-hidden="true"></span>
+          <div class="brand-text">
+            <h1>Night Neutralizer</h1>
+            <p class="tagline">Evens out the extremes</p>
+          </div>
+        </div>
+        <label class="switch" for="master">
+          <span class="switch-label">Enabled</span>
+          <input type="checkbox" id="master" />
+          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+        </label>
+      </header>
+
+      <p class="intro" id="intro">
+        Quiet dialogue comes up, loud effects come down, dark scenes are lifted
+        and bright ones roll off. Applies instantly, no reload.
+      </p>
+
+      <section class="card" id="controls" aria-labelledby="strength-title">
+        <div class="row">
+          <label class="title" id="strength-title" for="strength">Neutralization strength</label>
+          <output class="value" id="strength-value" for="strength">45</output>
+        </div>
+        <input
+          type="range"
+          id="strength"
+          min="0"
+          max="100"
+          step="1"
+          value="45"
+          aria-describedby="strength-help"
+        />
+        <div class="scale" aria-hidden="true">
+          <span>0 · off</span>
+          <span>50</span>
+          <span>100 · max</span>
+        </div>
+        <div class="explain">
+          <canvas
+            id="curve"
+            class="curve"
+            width="136"
+            height="96"
+            role="img"
+            aria-labelledby="curve-caption"
+          ></canvas>
+          <p class="help" id="strength-help">
+            <span id="curve-caption"
+              >Tone curve, shaded across the range it adapts over; dotted =
+              unchanged.</span
+            >
+            Higher strength = stronger compression. 0 bypasses everything.
+          </p>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="channels-title">
+        <h2 class="title" id="channels-title">What to process</h2>
+
+        <label class="toggle" for="audio">
+          <span class="toggle-copy">
+            <span class="toggle-name">Audio</span>
+            <span class="toggle-desc">Compressor + limiter with make-up gain</span>
+          </span>
+          <input type="checkbox" id="audio" />
+          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+        </label>
+
+        <label class="toggle" for="video">
+          <span class="toggle-copy">
+            <span class="toggle-name">Video</span>
+            <span class="toggle-desc">Shadow lift + highlight roll-off, flash guard</span>
+          </span>
+          <input type="checkbox" id="video" />
+          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+        </label>
+      </section>
+
+      <section class="card status" aria-labelledby="status-title">
+        <h2 class="title" id="status-title">Right now on this tab</h2>
+        <div id="status" role="status" aria-live="polite">
+          <p class="status-line">
+            <span class="dot" id="audio-dot" data-state="idle" aria-hidden="true"></span>
+            <span id="audio-status">Checking audio…</span>
+          </p>
+          <p class="status-line">
+            <span class="dot" id="video-dot" data-state="idle" aria-hidden="true"></span>
+            <span id="video-status">Checking video…</span>
+          </p>
+          <p class="notes" id="notes" hidden></p>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <button type="button" id="reset" class="link-button">Reset to defaults</button>
+        <span class="privacy">No accounts, no telemetry, nothing leaves your browser.</span>
+      </footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

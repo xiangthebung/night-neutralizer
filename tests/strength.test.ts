@@ -1,0 +1,275 @@
+import { describe, expect, it } from 'vitest';
+import {
+  chromiumInternalMakeupDb,
+  describeStrength,
+  mapAudioStrength,
+  mapStrength,
+  mapVideoStrength,
+  normalizeStrength,
+} from '../src/core/strength';
+import { dbToGain } from '../src/core/math';
+import { isIdentitySoftClip } from '../src/core/soft-clip';
+import { DEFAULT_SETTINGS } from '../src/core/types';
+
+const STEPS = Array.from({ length: 101 }, (_, i) => i);
+
+describe('normalizeStrength', () => {
+  it('clamps into the slider domain', () => {
+    expect(normalizeStrength(-40)).toBe(0);
+    expect(normalizeStrength(0)).toBe(0);
+    expect(normalizeStrength(45)).toBe(45);
+    expect(normalizeStrength(100)).toBe(100);
+    expect(normalizeStrength(1000)).toBe(100);
+  });
+
+  it('treats any non-finite input as bypass', () => {
+    // Garbage in must mean "do nothing", never "maximum processing".
+    expect(normalizeStrength(Number.NaN)).toBe(0);
+    expect(normalizeStrength(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(normalizeStrength(Number.NEGATIVE_INFINITY)).toBe(0);
+  });
+});
+
+describe('mapAudioStrength', () => {
+  it('is a true bypass at 0', () => {
+    const params = mapAudioStrength(0);
+    expect(params.bypass).toBe(true);
+    expect(params.compressor.ratio).toBe(1);
+    expect(params.limiter.ratio).toBe(1);
+    expect(params.preGainDb).toBe(0);
+    expect(params.makeupGainDb).toBe(0);
+    expect(dbToGain(params.preGainDb)).toBeCloseTo(1, 10);
+    expect(dbToGain(params.makeupGainDb)).toBeCloseTo(1, 10);
+  });
+
+  it('bypasses for out-of-range and invalid input', () => {
+    expect(mapAudioStrength(-10).bypass).toBe(true);
+    expect(mapAudioStrength(Number.NaN).bypass).toBe(true);
+  });
+
+  it('engages above 0', () => {
+    for (const strength of [1, 5, 45, 99, 100]) {
+      expect(mapAudioStrength(strength).bypass).toBe(false);
+    }
+  });
+
+  it('increases compression monotonically with strength', () => {
+    let previousRatio = -Infinity;
+    let previousThreshold = Infinity;
+    let previousKnee = Infinity;
+    for (const strength of STEPS.slice(1)) {
+      const { compressor } = mapAudioStrength(strength);
+      expect(compressor.ratio).toBeGreaterThanOrEqual(previousRatio);
+      expect(compressor.thresholdDb).toBeLessThanOrEqual(previousThreshold);
+      expect(compressor.kneeDb).toBeLessThanOrEqual(previousKnee);
+      previousRatio = compressor.ratio;
+      previousThreshold = compressor.thresholdDb;
+      previousKnee = compressor.kneeDb;
+    }
+  });
+
+  it('lengthens release with strength to avoid pumping', () => {
+    const gentle = mapAudioStrength(20);
+    const strong = mapAudioStrength(100);
+    expect(strong.compressor.release).toBeGreaterThan(gentle.compressor.release);
+    expect(strong.compressor.attack).toBeLessThan(gentle.compressor.attack);
+  });
+
+  it('targets peaks just below full scale, accounting for the node\u2019s own make-up', () => {
+    // Chromium's compressor adds its own make-up gain. Modelling the chain
+    // without it double-compensates: an offline render measured +32 dB on quiet
+    // material and peaks at +3.3 dBFS (clipping) before this was corrected.
+    const p = mapAudioStrength(100);
+    const peakOut =
+      p.compressor.thresholdDb +
+      (p.preGainDb - p.compressor.thresholdDb) / p.compressor.ratio +
+      chromiumInternalMakeupDb(p.compressor.thresholdDb, p.compressor.ratio);
+    expect(peakOut + p.makeupGainDb).toBeCloseTo(-4, 6);
+    expect(peakOut + p.makeupGainDb).toBeLessThan(0);
+  });
+
+  it('keeps the modelled steady-state peak below full scale at every strength', () => {
+    for (const strength of STEPS) {
+      const p = mapAudioStrength(strength);
+      if (p.bypass) continue;
+      const peakOut =
+        p.compressor.thresholdDb +
+        (p.preGainDb - p.compressor.thresholdDb) / p.compressor.ratio +
+        chromiumInternalMakeupDb(p.compressor.thresholdDb, p.compressor.ratio);
+      expect(peakOut + p.makeupGainDb).toBeLessThanOrEqual(0);
+    }
+  });
+
+  it('always ends in a bounded safety stage', () => {
+    expect(isIdentitySoftClip(mapAudioStrength(0).safety)).toBe(true);
+    for (const strength of [1, 45, 100]) {
+      const safety = mapAudioStrength(strength).safety;
+      expect(isIdentitySoftClip(safety)).toBe(false);
+      expect(safety.ceiling).toBeLessThan(1);
+      expect(safety.knee).toBeLessThan(safety.ceiling);
+      expect(safety.headroom).toBeGreaterThan(1);
+    }
+  });
+});
+
+describe('chromiumInternalMakeupDb', () => {
+  it('is zero when the compressor is not compressing', () => {
+    expect(chromiumInternalMakeupDb(-28, 1)).toBe(0);
+    expect(chromiumInternalMakeupDb(0, 4)).toBe(0);
+  });
+
+  it('grows with both depth and ratio', () => {
+    expect(chromiumInternalMakeupDb(-28, 4)).toBeGreaterThan(chromiumInternalMakeupDb(-14, 4));
+    expect(chromiumInternalMakeupDb(-28, 4)).toBeGreaterThan(chromiumInternalMakeupDb(-28, 2));
+  });
+
+  it('stays below the full reduction it compensates for', () => {
+    const reduction = 28 * (1 - 1 / 4);
+    expect(chromiumInternalMakeupDb(-28, 4)).toBeLessThan(reduction);
+    expect(chromiumInternalMakeupDb(-28, 4)).toBeGreaterThan(0);
+  });
+
+  it('boosts quiet content more than loud content', () => {
+    const p = mapAudioStrength(70);
+    const quietIn = -45;
+    const loudIn = 0;
+    const process = (inputDb: number): number => {
+      const driven = inputDb + p.preGainDb;
+      const compressed =
+        driven <= p.compressor.thresholdDb
+          ? driven
+          : p.compressor.thresholdDb + (driven - p.compressor.thresholdDb) / p.compressor.ratio;
+      return compressed + p.makeupGainDb;
+    };
+    const quietOut = process(quietIn);
+    const loudOut = process(loudIn);
+    expect(quietOut - quietIn).toBeGreaterThan(loudOut - loudIn);
+    // The range must shrink, never invert.
+    expect(loudOut).toBeGreaterThan(quietOut);
+    expect(loudOut - quietOut).toBeLessThan(loudIn - quietIn);
+  });
+
+  it('keeps every value inside the Web Audio parameter ranges', () => {
+    for (const strength of STEPS) {
+      const p = mapAudioStrength(strength);
+      for (const stage of [p.compressor, p.limiter]) {
+        expect(stage.thresholdDb).toBeGreaterThanOrEqual(-100);
+        expect(stage.thresholdDb).toBeLessThanOrEqual(0);
+        expect(stage.kneeDb).toBeGreaterThanOrEqual(0);
+        expect(stage.kneeDb).toBeLessThanOrEqual(40);
+        expect(stage.ratio).toBeGreaterThanOrEqual(1);
+        expect(stage.ratio).toBeLessThanOrEqual(20);
+        expect(stage.attack).toBeGreaterThanOrEqual(0);
+        expect(stage.attack).toBeLessThanOrEqual(1);
+        expect(stage.release).toBeGreaterThanOrEqual(0);
+        expect(stage.release).toBeLessThanOrEqual(1);
+      }
+      expect(p.makeupGainDb).toBeGreaterThanOrEqual(0);
+      expect(p.makeupGainDb).toBeLessThanOrEqual(24);
+      expect(Number.isFinite(p.preGainDb)).toBe(true);
+    }
+  });
+
+  it('has no discontinuity next to bypass', () => {
+    const nearZero = mapAudioStrength(1);
+    expect(nearZero.compressor.ratio).toBeLessThan(1.05);
+    expect(nearZero.makeupGainDb).toBeLessThan(0.5);
+    expect(nearZero.preGainDb).toBeLessThan(0.5);
+  });
+
+  it('keeps limiter latency-friendly and fast', () => {
+    const p = mapAudioStrength(60);
+    expect(p.limiter.ratio).toBe(20);
+    expect(p.limiter.attack).toBeLessThanOrEqual(0.005);
+    expect(p.limiter.thresholdDb).toBeLessThan(0);
+    expect(p.limiter.thresholdDb).toBeGreaterThan(-3);
+  });
+});
+
+describe('mapVideoStrength', () => {
+  it('is a bypass at 0', () => {
+    const p = mapVideoStrength(0);
+    expect(p.bypass).toBe(true);
+    expect(p.blackLift).toBe(0);
+    expect(p.shadowGamma).toBe(1);
+    expect(p.highlightCompression).toBe(0);
+    expect(p.saturation).toBe(1);
+    expect(p.adapt.enabled).toBe(false);
+    expect(p.adapt.flashDim).toBe(0);
+  });
+
+  it('increases shadow lift and highlight roll-off monotonically', () => {
+    let lift = -1;
+    let gamma = -1;
+    let roll = -1;
+    let knee = Infinity;
+    for (const strength of STEPS.slice(1)) {
+      const p = mapVideoStrength(strength);
+      expect(p.blackLift).toBeGreaterThanOrEqual(lift);
+      expect(p.shadowGamma).toBeGreaterThanOrEqual(gamma);
+      expect(p.highlightCompression).toBeGreaterThanOrEqual(roll);
+      expect(p.kneeStart).toBeLessThanOrEqual(knee);
+      lift = p.blackLift;
+      gamma = p.shadowGamma;
+      roll = p.highlightCompression;
+      knee = p.kneeStart;
+    }
+  });
+
+  it('keeps the black lift small enough not to wash the image out', () => {
+    // The absolute black lift is the part that greys out an image, so it stays
+    // small; the shadow gamma does the visible work instead.
+    expect(mapVideoStrength(100).blackLift).toBeLessThanOrEqual(0.08);
+    expect(mapVideoStrength(100).shadowGamma).toBeLessThanOrEqual(2);
+  });
+
+  it('produces a visible effect at the default strength', () => {
+    // Regression guard: the first release was mapped so gently that the video
+    // effect was imperceptible at the default setting.
+    const p = mapVideoStrength(DEFAULT_SETTINGS.strength);
+    expect(p.shadowGamma).toBeGreaterThan(1.3);
+    expect(p.highlightCompression).toBeGreaterThan(0.1);
+    expect(p.adapt.flashDim).toBeGreaterThan(0.15);
+    expect(p.adapt.minExposure).toBeLessThan(0.9);
+  });
+
+  it('compensates saturation as contrast is reduced', () => {
+    expect(mapVideoStrength(100).saturation).toBeGreaterThan(mapVideoStrength(20).saturation);
+    expect(mapVideoStrength(100).saturation).toBeLessThan(1.25);
+  });
+
+  it('makes the flash guard more sensitive at higher strength', () => {
+    const gentle = mapVideoStrength(20);
+    const strong = mapVideoStrength(100);
+    expect(strong.adapt.flashRate).toBeLessThan(gentle.adapt.flashRate);
+    expect(strong.adapt.flashDim).toBeGreaterThan(gentle.adapt.flashDim);
+    expect(strong.adapt.minExposure).toBeLessThan(gentle.adapt.minExposure);
+  });
+
+  it('dims faster than it recovers', () => {
+    const p = mapVideoStrength(50);
+    expect(p.adapt.dimTau).toBeLessThan(p.adapt.recoverTau);
+  });
+});
+
+describe('mapStrength', () => {
+  it('returns both halves consistently', () => {
+    const p = mapStrength(45);
+    expect(p.audio.bypass).toBe(false);
+    expect(p.video.bypass).toBe(false);
+    const off = mapStrength(0);
+    expect(off.audio.bypass).toBe(true);
+    expect(off.video.bypass).toBe(true);
+  });
+});
+
+describe('describeStrength', () => {
+  it('labels the buckets', () => {
+    expect(describeStrength(0)).toBe('Bypass');
+    expect(describeStrength(10)).toBe('Very gentle');
+    expect(describeStrength(30)).toBe('Gentle');
+    expect(describeStrength(45)).toBe('Balanced');
+    expect(describeStrength(70)).toBe('Strong');
+    expect(describeStrength(100)).toBe('Maximum');
+  });
+});

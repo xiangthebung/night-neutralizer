@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Night Neutralizer · local test bench</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #07090d;
+        color: #d6dced;
+        font: 14px/1.5 system-ui, sans-serif;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      h2 {
+        font-size: 14px;
+        margin: 28px 0 8px;
+      }
+      p {
+        max-width: 70ch;
+        color: #99a3b8;
+      }
+      .pair {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+      figure {
+        margin: 0;
+      }
+      figcaption {
+        font-size: 12px;
+        color: #7d879b;
+        padding-top: 4px;
+      }
+      video,
+      canvas {
+        width: 420px;
+        height: 236px;
+        background: #000;
+        border: 1px solid #1b2130;
+        border-radius: 6px;
+        display: block;
+      }
+      button {
+        background: #151c2a;
+        color: #d6dced;
+        border: 1px solid #26304a;
+        border-radius: 6px;
+        padding: 7px 11px;
+        font: inherit;
+        cursor: pointer;
+        margin: 0 6px 6px 0;
+      }
+      button:hover {
+        background: #1b2436;
+      }
+      code {
+        background: #121826;
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      #log {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        color: #7fc9a0;
+        white-space: pre-line;
+        min-height: 3em;
+      }
+      iframe {
+        width: 460px;
+        height: 300px;
+        border: 1px solid #1b2130;
+        border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Night Neutralizer — local test bench</h1>
+    <p>
+      Everything here is generated in the browser, so there are no binary test
+      assets. Serve this folder over http (see <code>npm run testpage</code>);
+      content scripts do not run on <code>file://</code> URLs unless you
+      explicitly allow it.
+    </p>
+
+    <h2>1. Video: dark scene, bright scene, hard cut, flash</h2>
+    <p>
+      The <strong>video</strong> element on the left is fed from the canvas on the
+      right via <code>captureStream()</code>. The extension only processes
+      <code>&lt;video&gt;</code>, so the canvas is your unprocessed reference:
+      any difference you see is the tone mapping. Watch the shadow detail in the
+      dark scene and the sky in the bright scene, then watch the flash at the end
+      of each cycle.
+    </p>
+    <div class="pair">
+      <figure>
+        <video id="scene" playsinline muted></video>
+        <figcaption>&lt;video&gt; — processed by the extension</figcaption>
+      </figure>
+      <figure>
+        <canvas id="source" width="640" height="360"></canvas>
+        <figcaption>&lt;canvas&gt; source — never processed (reference)</figcaption>
+      </figure>
+    </div>
+    <div>
+      <button id="play-video">Play video</button>
+      <button id="pause-video">Pause video</button>
+      <button id="fullscreen">Request fullscreen</button>
+    </div>
+
+    <h2>2. Audio: whisper / normal / blast loop</h2>
+    <p>
+      A generated 12 s WAV loop that steps through −42 dBFS, −24 dBFS and
+      0 dBFS material. With the extension on, the quiet part should be clearly
+      audible and the blast should stop being startling. Use the element's own
+      volume and mute controls to confirm they still work.
+    </p>
+    <audio id="clip" controls loop></audio>
+
+    <h2>3. Lifecycle: dynamic insertion, replacement, removal</h2>
+    <p>
+      Exercises the MutationObserver paths: new elements must be picked up
+      without a reload, moved elements must not be re-processed, removed
+      elements must be cleaned up.
+    </p>
+    <div id="slot" class="pair"></div>
+    <div>
+      <button id="add">Insert a new video</button>
+      <button id="swap">Replace the source (SPA-style)</button>
+      <button id="move">Move it to another container</button>
+      <button id="remove">Remove it</button>
+    </div>
+    <div id="slot2" class="pair"></div>
+    <div id="log" role="status" aria-live="polite"></div>
+
+    <h2>4. Static test pattern (for pixel comparisons)</h2>
+    <p>
+      A fixed grey ramp, so you can compare the same frame with and without
+      processing. Toggle the extension and watch the dark end of the ramp
+      separate while the white end pulls back. The automated smoke test measures
+      exactly this by screenshotting the element.
+    </p>
+    <div class="pair">
+      <figure>
+        <video id="wedge" playsinline muted></video>
+        <figcaption>&lt;video&gt; — processed</figcaption>
+      </figure>
+      <figure>
+        <canvas id="wedge-source" width="480" height="270"></canvas>
+        <figcaption>&lt;canvas&gt; source — reference</figcaption>
+      </figure>
+    </div>
+
+    <h2>5. Nested frame</h2>
+    <p>
+      The manifest injects into all frames, so an embedded player is processed
+      too. This iframe runs its own copy of the content script.
+    </p>
+    <iframe src="frame.html" title="Nested player"></iframe>
+
+    <script src="scene.js"></script>
+    <script src="bench.js"></script>
+  </body>
+</html>

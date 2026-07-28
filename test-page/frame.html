@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Nested player</title>
+    <style>
+      body {
+        margin: 0;
+        background: #05070a;
+        color: #8b95ab;
+        font: 12px/1.4 system-ui, sans-serif;
+        padding: 8px;
+      }
+      video {
+        width: 100%;
+        height: 220px;
+        background: #000;
+        border-radius: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="nested" playsinline muted autoplay></video>
+    <p>Nested frame: same generated scene, separate content-script instance.</p>
+    <script src="scene.js"></script>
+    <script>
+      const canvas = document.createElement('canvas');
+      canvas.width = 480;
+      canvas.height = 270;
+      startScene(canvas, { speed: 1.4 });
+      const video = document.getElementById('nested');
+      video.srcObject = canvas.captureStream(30);
+      video.play().catch(() => {});
+    </script>
+  </body>
+</html>
