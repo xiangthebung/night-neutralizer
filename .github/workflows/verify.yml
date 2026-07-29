@@ -13,9 +13,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node 24, not 20. Two hard floors sit above 20 and both fail at module
+      # load rather than in a test, which makes them look like flakes:
+      #   - jsdom 30 -> undici 8 reads `markAsUncloneable` off node:worker_threads
+      #     at require time. It landed in Node 22.10, so on 20 every test file
+      #     using the jsdom environment dies with "not a function" before it runs.
+      #   - scripts/smoke.mjs speaks CDP over the global WebSocket, unflagged from
+      #     Node 22 only, so on 20 it aborts with "WebSocket is not defined".
+      # jsdom's own engines field is ^22.22.2 || ^24.15.0 || >=26.0.0.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - run: npm ci
@@ -38,9 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # See the note in the verify job: the smoke script needs the global
+      # WebSocket, which is only unflagged from Node 22.
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - run: npm ci
