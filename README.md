@@ -604,8 +604,12 @@ Consequences:
 - **Very high-resolution video with a filter** can push some GPU/driver
   combinations onto a slower compositing path. If a 4K stream stutters, lower the
   strength or turn video processing off for that session.
-- **`file://` pages** are not covered unless you enable *Allow access to file
-  URLs* for the extension on `chrome://extensions`.
+- **`file://` pages are not supported at all.** The content script in
+  `src/manifest.json` matches `http://*/*` and `https://*/*`, and nothing else, so
+  it never runs on a local file. Enabling *Allow access to file URLs* on
+  `chrome://extensions` does not change that — that toggle grants a permission to
+  extensions whose match patterns already include `file:///*`, and this one's do
+  not. This entry used to claim the opposite.
 - **A hidden/background tab** shows `fixed night curve` until it becomes visible
   again, because analysis is paused to save CPU.
 - **The flash guard is reactive, not predictive.** It dims the frames *after* the
