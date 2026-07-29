@@ -8,6 +8,8 @@
  */
 import { DEFAULT_SETTINGS, SETTINGS_KEY, type Settings } from './types';
 import { clamp } from './math';
+import { sanitizeDisabledSites } from './site';
+import { sanitizeClock } from './schedule';
 
 export interface StorageAreaLike {
   get(keys: string | string[] | null): Promise<Record<string, unknown>>;
@@ -30,16 +32,32 @@ export function sanitizeSettings(raw: unknown): Settings {
   const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Settings>;
   const bool = (value: unknown, fallback: boolean): boolean =>
     typeof value === 'boolean' ? value : fallback;
-  const strengthRaw = typeof source.strength === 'number' ? source.strength : Number.NaN;
-  const strength = Number.isFinite(strengthRaw)
-    ? Math.round(clamp(strengthRaw, 0, 100))
-    : DEFAULT_SETTINGS.strength;
+  const level = (value: unknown, fallback: number): number => {
+    const numeric = typeof value === 'number' ? value : Number.NaN;
+    return Number.isFinite(numeric) ? Math.round(clamp(numeric, 0, 100)) : fallback;
+  };
+
+  const strength = level(source.strength, DEFAULT_SETTINGS.strength);
 
   return {
     enabled: bool(source.enabled, DEFAULT_SETTINGS.enabled),
     strength,
+    linked: bool(source.linked, DEFAULT_SETTINGS.linked),
+    // Migration: settings written before the split existed only carry
+    // `strength`, so the per-channel values start from it. Someone who has been
+    // running at 70 and unlinks gets 70/70, not a surprise jump to the default.
+    audioStrength: level(source.audioStrength, strength),
+    videoStrength: level(source.videoStrength, strength),
     audio: bool(source.audio, DEFAULT_SETTINGS.audio),
     video: bool(source.video, DEFAULT_SETTINGS.video),
+    nightEq: bool(source.nightEq, DEFAULT_SETTINGS.nightEq),
+    disabledSites: sanitizeDisabledSites(source.disabledSites),
+    nightOnly: bool(source.nightOnly, DEFAULT_SETTINGS.nightOnly),
+    // `sanitizeClock` accepts minutes or "HH:MM", so a hand-edited storage value
+    // works as well as one written by the popup.
+    nightStart: sanitizeClock(source.nightStart, DEFAULT_SETTINGS.nightStart),
+    nightEnd: sanitizeClock(source.nightEnd, DEFAULT_SETTINGS.nightEnd),
+    skipMusic: bool(source.skipMusic, DEFAULT_SETTINGS.skipMusic),
   };
 }
 
@@ -47,8 +65,18 @@ export function settingsEqual(a: Settings, b: Settings): boolean {
   return (
     a.enabled === b.enabled &&
     a.strength === b.strength &&
+    a.linked === b.linked &&
+    a.audioStrength === b.audioStrength &&
+    a.videoStrength === b.videoStrength &&
     a.audio === b.audio &&
-    a.video === b.video
+    a.video === b.video &&
+    a.nightEq === b.nightEq &&
+    a.nightOnly === b.nightOnly &&
+    a.nightStart === b.nightStart &&
+    a.nightEnd === b.nightEnd &&
+    a.skipMusic === b.skipMusic &&
+    a.disabledSites.length === b.disabledSites.length &&
+    a.disabledSites.every((site, index) => site === b.disabledSites[index])
   );
 }
 
@@ -70,7 +98,7 @@ export class SettingsStore {
     } catch {
       // Storage can fail if the extension context was invalidated (reload,
       // update). Falling back to defaults keeps the page usable.
-      return { ...DEFAULT_SETTINGS };
+      return sanitizeSettings({});
     }
   }
 
@@ -83,7 +111,10 @@ export class SettingsStore {
   }
 
   async reset(): Promise<Settings> {
-    const next = { ...DEFAULT_SETTINGS };
+    // Via sanitize rather than a spread of DEFAULT_SETTINGS, so the stored
+    // object owns its own `disabledSites` array instead of aliasing the
+    // module-level default.
+    const next = sanitizeSettings({});
     await this.area.set({ [SETTINGS_KEY]: next });
     return next;
   }

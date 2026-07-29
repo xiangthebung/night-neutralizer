@@ -8,11 +8,12 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { findChrome } from './find-chrome.mjs';
 
 const strength = Number(process.argv[2] ?? 45);
-const outFile = process.argv[3] ?? '/tmp/popup.png';
-const CHROME =
-  process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// Defaults into the OS temp directory rather than a hard-coded /tmp.
+const outFile = process.argv[3] ?? path.join(tmpdir(), 'nn-popup.png');
+const CHROME = findChrome();
 const port = 9351 + (Number(process.env.SHOT_OFFSET) || 0);
 const profile = await mkdtemp(path.join(tmpdir(), 'nn-shot-'));
 const dist = path.resolve('dist');
@@ -77,7 +78,24 @@ const swTarget = targets.find(
 if (swTarget) {
   const sw = await connect(swTarget.webSocketDebuggerUrl);
   await sw.send('Runtime.evaluate', {
-    expression: `chrome.storage.sync.set({ settings: { enabled: true, strength: ${strength}, audio: true, video: true } })`,
+    expression: `chrome.storage.sync.set({ settings: ${JSON.stringify({
+      enabled: true,
+      strength,
+      // SPLIT=1 renders the separated audio/video sliders, NIGHT_EQ=1 the EQ row.
+      linked: process.env.SPLIT !== '1',
+      audioStrength: Number(process.env.AUDIO_STRENGTH ?? strength),
+      videoStrength: Number(process.env.VIDEO_STRENGTH ?? strength),
+      audio: true,
+      video: true,
+      nightEq: process.env.NIGHT_EQ === '1',
+      disabledSites: [],
+      // Shown by default: the night window row is part of the worst-case height,
+      // so measuring it hidden would flatter the layout. NIGHT_ONLY=0 hides it.
+      nightOnly: process.env.NIGHT_ONLY !== '0',
+      nightStart: 21 * 60,
+      nightEnd: 7 * 60,
+      skipMusic: true,
+    })} })`,
     awaitPromise: true,
   });
   sw.ws.close();
@@ -87,14 +105,44 @@ const tab = await openTab(`chrome-extension://${extensionId}/popup.html`);
 const page = await connect(tab.webSocketDebuggerUrl);
 await page.send('Runtime.enable');
 await page.send('Page.enable');
-await new Promise((r) => setTimeout(r, 1200));
+// Long enough for the async work in init() (settings load, commands.getAll,
+// first status poll) to have settled, otherwise the measurement below describes
+// a popup that is still filling in.
+await new Promise((r) => setTimeout(r, 3000));
 
+/*
+ * Chrome caps a popup at 600 CSS px and scrolls beyond that, so the height is
+ * part of the design budget. The worst case is a page where the per-site button
+ * is showing, which this profile has no way to produce, so it is measured by
+ * revealing the button directly.
+ */
 const size = await page.send('Runtime.evaluate', {
-  expression: `JSON.stringify({ w: document.querySelector('.app').offsetWidth, h: document.body.scrollHeight })`,
+  expression: `(() => {
+     const app = document.querySelector('.app');
+     const h = document.body.scrollHeight;
+     const button = document.getElementById('site-toggle');
+     const wasHidden = button.hidden;
+     button.hidden = false;
+     const withSite = document.body.scrollHeight;
+     button.hidden = wasHidden;
+     const keys = document.getElementById('shortcut-keys');
+     return JSON.stringify({
+       w: app.offsetWidth,
+       h,
+       withSite,
+       shortcutShown: !document.getElementById('shortcut').hidden,
+       shortcutKeys: JSON.stringify(keys.textContent),
+     });
+   })()`,
   returnByValue: true,
 });
-const { w, h } = JSON.parse(size.result.value);
-console.log(`strength ${strength}: popup is ${w} x ${h} CSS px (Chrome caps popups at 600 tall)`);
+const { w, h, withSite, shortcutShown, shortcutKeys } = JSON.parse(size.result.value);
+const verdict = withSite > 600 ? `OVER the 600 cap by ${withSite - 600}` : 'fits the 600 cap';
+console.log(
+  `strength ${strength}: popup is ${w} x ${h} CSS px ` +
+    `(${withSite} with the per-site button) — ${verdict}`,
+);
+console.log(`shortcut hint: ${shortcutShown ? `shown, keys=${shortcutKeys}` : 'hidden'}`);
 
 const shot = await page.send('Page.captureScreenshot', {
   format: 'png',
@@ -107,4 +155,8 @@ console.log(`wrote ${outFile}`);
 page.ws.close();
 browser.ws.close();
 chrome.kill('SIGKILL');
-await rm(profile, { recursive: true, force: true });
+// Windows keeps a handle on Crashpad files for a moment after the kill, so a
+// failed profile cleanup must not mask a successful screenshot.
+await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(
+  (error) => console.warn(`could not remove the temp profile: ${error.code ?? error.message}`),
+);

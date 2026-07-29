@@ -1,0 +1,50 @@
+name: verify
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: typecheck + unit tests + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run verify
+
+      # The packaged artefact is built by the same code path users download,
+      # so a broken zip step fails CI rather than release day.
+      - run: npm run zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: night-neutralizer-unpacked
+          path: dist/
+          if-no-files-found: error
+
+  smoke:
+    name: end-to-end in real Chrome
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # ubuntu-latest ships Chrome at /usr/bin/google-chrome; scripts/smoke.mjs
+      # discovers it automatically, CHROME_PATH is only a manual override.
+      - run: npm run smoke

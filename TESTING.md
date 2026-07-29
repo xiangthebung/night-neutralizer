@@ -13,7 +13,7 @@ npm run smoke    # end-to-end in headless Chrome
 
 ## 1. Automated: unit tests
 
-`npm test` — 119 tests, no browser required.
+`npm test` — 298 tests, no browser required.
 
 | file | covers |
 | --- | --- |
@@ -21,9 +21,17 @@ npm run smoke    # end-to-end in headless Chrome
 | `tests/soft-clip.test.ts` | safety clipper: exact identity below the knee, never exceeding the ceiling for input up to 50× full scale, monotonic and symmetric, less than 1 dB cost to a full-scale signal, decreasing slope, curve sampling (odd length, exact zero, identity samples on the identity line), identity params producing a straight line |
 | `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, CSS fallback shape |
 | `tests/media-registry.test.ts` | discovery before and after start, dynamic insertion, **duplicate prevention** (re-attach, rescan, DOM move), open shadow roots (and closed ones ignored), removal only after the grace period, re-parented elements surviving, subtree removal, element swap, mutation-storm rescan, throwing handlers, `stop()`/`release()`, idempotent `start()` |
-| `tests/settings.test.ts` | sanitisation of missing/garbage/hostile values, clamping and rounding, unknown keys dropped, save→load round-trip through a fresh store, storage failure falling back to defaults, `ensureDefaults` writing only once, reset, change notifications, ignoring other areas/keys, unsubscribe not leaking listeners |
+| `tests/settings.test.ts` | sanitisation of missing/garbage/hostile values, clamping and rounding, unknown keys dropped, save→load round-trip through a fresh store, storage failure falling back to defaults, `ensureDefaults` writing only once, reset, change notifications, ignoring other areas/keys, unsubscribe not leaking listeners, **migration of pre-split settings** (the old single `strength` mirrored into both channels), exclusion-list cleaning, **the default exclusion array never being shared with stored settings**, effective strength with the link on and off |
+| `tests/site.test.ts` | hostname normalisation (case, `www.`, ports, credentials, trailing dots, IPv6 literals, full URLs, opaque origins), **site keys derived from `location.ancestorOrigins`** so an embedded player is governed by the page it is embedded in, subdomain coverage without matching lookalike hosts (`example.com` covers `news.example.com` but not `notexample.com`), a stray empty entry not disabling the whole web, add/remove including collapsing subdomains under a newly added parent and removing a covering parent when a subdomain is re-enabled, list capping |
+| `tests/readings.test.ts` | the popup's plain-language captions: **the figures agree with the very curves and transfer function the engines use**, each is taken from the adaptation bound where it is actually strongest (reading both video numbers off one bound understates the effect), they match the documented figures at the default strength, they grow monotonically with strength, they **never overstate what the chain delivers** (figures are floored), they avoid meaningless output at the bottom of the range ("1.0× brighter", "0% softer"), and they stay under 30 characters so they cannot wrap and push the popup past Chrome's height cap |
+| `tests/tone-filter.test.ts` | (jsdom) filter and stylesheet installation, idempotency, **self-repair after the page removes the injected nodes**, the CSS-filter fallback, **the `<base href>` workaround writing an absolute URL**, table/saturation writes skipped when unchanged, marking/unmarking, **fullscreen re-parenting of the filter host and back**, teardown leaving no trace but staying rebuildable, `destroy()` refusing to rebuild |
+| `tests/status-reporter.test.ts` | a burst of `schedule()` calls coalescing into one message, unchanged status not resent (ignoring the timestamp), resending once something really changes, ~1 message/second rate limiting, a throwing snapshot builder swallowed, permanent stop once the extension context is gone, `stop()` cancelling a pending report, a rejected `sendMessage` not throwing |
 | `tests/media-origin.test.ts` | Web Audio safety classification: MSE/blob (YouTube, Vimeo), `data:`, `srcObject`, same-origin, `file:`, plain cross-origin flagged risky, CORS-attributed accepted, empty source deferred, unparseable URLs and opaque origins treated conservatively |
-| `tests/status.test.ts` | multi-frame aggregation, state precedence, note deduplication, staleness, pruning |
+| `tests/status.test.ts` | multi-frame aggregation, state precedence, note deduplication, staleness, pruning, **gate reasons across frames** (one working frame speaks for the tab, a sensor verdict outranks a clock one, the lux value comes from the top frame), music skips summed and a music host noticed in any frame |
+| `tests/schedule.test.ts` | night-window arithmetic: `"HH:MM"` parsing and rejection (an empty time input must not become midnight), format round-trip across the whole day, stored values wrapped rather than rejected, **the window that wraps midnight** with an inclusive start and exclusive end, a same-day window, **a collapsed window reading as *always* rather than never**, time-to-next-boundary in both directions including across midnight and to the second, locale-aware display matching what a time input renders |
+| `tests/ambient.test.ts` | lux → dark/bright with a **deliberate gap between the thresholds** so a reading at the boundary cannot flip the extension once a second, the midpoint decision with no prior verdict, nonsense values refused rather than guessed, a reading old enough to be from another day discarded so the clock takes over, **the publishing throttle** (verdict changes go out at once, a steady room publishes nothing, a real change waits out the gap), and the shared store: round-trip, a failed write reported rather than thrown (the normal case before the service worker widens session access), other storage areas ignored, unsubscribe not leaking |
+| `tests/music.test.ts` | the music heuristics: listed services and their subdomains, **any `music.*` host** so regional variants need no entry, general video hosts left alone (`music.youtube.com` matches and `youtube.com` does not), lookalike hosts not fooling it, an embedded player on an unrelated page still counting, **every list entry already in normalised form** or it could never match, element classification waiting for metadata (every `<video>` is 0x0 until then), audio-only playback anywhere counting as music, and film not being assumed to be music while it loads |
+| `tests/gate.test.ts` | the single processing decision and its **order of precedence**: master switch, then the exclusion list, then the sensor, then the clock. The sensor overriding the clock in both directions, the clock used when there is no reading, the sensor ignored once the night restriction is off, custom and collapsed windows, and the re-check delay (no timer when nothing is time-dependent, capped so a DST change cannot go unnoticed for an hour, never short enough to spin) |
 
 ## 2. Automated: end-to-end in real Chrome
 
@@ -33,7 +41,15 @@ npm run smoke
 
 Installs the built extension into a throwaway Chrome profile over the DevTools
 protocol (`Extensions.loadUnpacked`; Chrome 137+ ignores `--load-extension`),
-serves the test bench, and asserts 42 checks:
+serves the test bench, and asserts 69 checks.
+
+Note that the suite writes `nightOnly: false` and `skipMusic: false` into its
+baseline settings. The shipped defaults only process between 21:00 and 07:00 and
+leave audio-only players alone, so a run at three in the afternoon would otherwise
+be measuring an extension that is correctly doing nothing. Both are then exercised
+explicitly, against a window shifted relative to the machine's real clock.
+
+The checks:
 
 - extension installs, service worker registers;
 - the content script injects and creates its filter definition;
@@ -75,16 +91,59 @@ serves the test bench, and asserts 42 checks:
   undocumented internal make-up gain, and a knee wide enough to leave loud
   material uncompressed at the default strength. No audio device is used —
   offline rendering is silent by construction;
+- **the night EQ**, measured through the two filters on their own: −5.15 dB at
+  60 Hz, +0.25 dB at 700 Hz, +2.74 dB at 2.6 kHz at strength 70, and flat to
+  within 0.001 dB at strength 0. The full chain is re-rendered with the EQ engaged
+  to confirm the burst still never clips (worst peak −2.16 dBFS);
+- **the popup's audio graph describes the real chain.** `audioTransferDb()` is an
+  analytical steady-state model of the chain, and the popup plots it, so the suite
+  renders the actual chain at −45/−30/−18/−6/0 dBFS and compares. Worst
+  disagreement 1.7 dB, in the conservative direction. This is the check that stops
+  the picture in the popup drifting away from what you hear;
 - strength 0 removes the video filter and bypasses audio, live;
 - master off removes processing; re-enabling restores it, live;
+- **the toolbar badge** reads `off` when the extension is switched off, clears
+  when it is switched back on, reads `site` on a tab whose host is excluded, and
+  reads `day` while it is standing down until night;
+- **the night window**, against a window shifted relative to the machine's actual
+  clock: outside it no video is marked, audio reports `off` and the frame reports
+  `gate=daytime/clock`; the reported source is `clock` with **no lux value**, which
+  is also the documented behaviour of a browser that does not expose
+  `AmbientLightSensor` (i.e. every stock Chrome); moving the window over the
+  current time resumes processing with no reload;
+- **leaving music alone**: with the exemption on, the bench's `<audio>` element is
+  reported as `music` with `processed = 0` while video still reports `adaptive`,
+  so the two halves really are independent; turning it off compresses it again;
+- **separated sliders really separate**: video strength 0 with audio at 70 leaves
+  no marked videos while audio still reports `active`, and the reverse bypasses
+  audio while the tone curve keeps running;
+- **per-site exclusion**: the frame reports a bare hostname (`localhost`), listing
+  it stops both halves and sets `siteDisabled`, and listing an unrelated host
+  leaves the page alone;
 - a dynamically inserted video is picked up;
 - a nested iframe gets its own content script and filter;
-- the popup renders stored settings, its tone-curve thumbnail draws and tracks
-  the slider, and its status query returns a live aggregate;
-- the keyboard shortcut is registered and actually bound to a key;
+- the popup renders stored settings, **both** thumbnails draw and track the
+  slider, the link toggle swaps the sliders over and persists the choice, the
+  per-site button names the real host and writes the exclusion, and the status
+  query returns a live aggregate;
+- the popup's night controls: the clock fields stay hidden while the night
+  restriction is off, switching it on reveals them and persists the choice, and the
+  line under the switch **says which signal is deciding** rather than implying a
+  sensor is in use when there is none;
+- the keyboard-shortcut command is declared and described, and the popup's hint
+  matches whatever `chrome.commands.getAll()` reports — including staying hidden
+  when nothing is bound. (An extension side-loaded over CDP into a throwaway
+  profile does not get its suggested accelerator assigned, so the binding itself
+  is verified by hand: see section 9.);
 - no console errors in the page, the service worker, or the popup.
 
-Set `CHROME_PATH` if Chrome is not at the macOS default location.
+Chrome is located automatically on macOS, Windows and Linux. Set `CHROME_PATH` to
+override the search:
+
+```bash
+CHROME_PATH=/path/to/chrome npm run smoke          # macOS / Linux
+$env:CHROME_PATH = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+```
 
 ## 3. Manual: the local test bench
 
@@ -234,26 +293,143 @@ Use Netflix, Prime Video, Disney+, or Spotify's web player.
 | `chrome://extensions` or the Web Store in the active tab | popup says processing is not available on this page |
 | Hidden/background tab | analysis pauses; popup reports the fixed curve; adaptivity resumes when the tab is shown |
 
-## 9. Keyboard shortcut
+## 9. Keyboard shortcut and toolbar state
 
 1. With a video playing, press `Alt+Shift+N`. Processing should stop
    immediately, in every open tab, without the popup being opened.
-2. Press it again to restore. Open the popup and confirm the master toggle
-   reflects the current state.
-3. Visit `chrome://extensions/shortcuts`, remap it, and confirm the new binding
-   works.
+2. **Watch the toolbar icon**, not the video: it must dim and show an `off`
+   badge. This is the whole point of the badge — on a tab with no video the key
+   press would otherwise have no observable effect at all.
+3. Press it again to restore. The icon returns to normal and the badge clears.
+   Open the popup and confirm the master toggle reflects the current state.
+4. Visit `chrome://extensions/shortcuts`, remap it, and confirm the new binding
+   works **and that the popup's hint now shows the new keys**. Unbind it entirely
+   and confirm the hint disappears rather than showing an empty key.
 
-## 10. Accessibility pass
+## 10. Per-site exclusions
+
+1. On a page with a video, open the popup. The status card's title row should
+   offer **Skip *hostname***, naming the site you are on.
+2. Click it. Processing stops for that tab immediately — the popup says
+   `turned off on <host>` for both halves, and that tab's badge reads `site`
+   while the master switch stays on.
+3. Open a *different* site with video and confirm it is still processed.
+4. Return to the skipped site and click the button again; processing resumes
+   without a reload.
+5. Skip a domain, then visit a subdomain of it (e.g. skip `example.com`, then
+   open `news.example.com`): the subdomain must also be skipped, and the button
+   must show as pressed there.
+6. Find a page with an embedded player from another origin (a YouTube or Vimeo
+   embed on a blog). Skipping the *blog* must silence the embed, because a frame
+   is governed by the page it is embedded in.
+
+## 11. Split strength and night EQ
+
+1. In the popup, click **Set audio and video separately**. The single slider is
+   replaced by two, and the two graphs update independently.
+2. Set video strength to 0 and audio to 80: the picture must go back to normal
+   while the popup still reports audio compressing. Then reverse it.
+3. Click **Use one slider for both**: the master slider reappears at the midpoint
+   of the two values.
+4. **Night EQ**, with headphones on quiet dialogue-heavy content: switching it on
+   should audibly thin out the bass and bring speech forward. It must not change
+   the perceived loudness much — if it gets obviously louder or quieter, the
+   make-up compensation is wrong.
+5. Turn night EQ on and set strength to 0. Everything must be bypassed; the EQ
+   must not survive a bypass.
+6. With night EQ on at strength 100, listen to a loud bass-heavy passage for
+   crackle. Any distortion means the presence lift is not being paid for out of
+   make-up gain.
+
+## 12. The night window and the light sensor
+
+1. Open the popup on a page with video. **Only at night** should be on, with the
+   window reading 21:00–07:00 (in your locale's format) and the line under the
+   switch saying which signal is deciding.
+2. If it is currently outside the window, both status lines should read
+   `waiting for 09:00 PM` (or your start time), that tab's badge should read
+   `day`, and no video should be filtered. That is the feature working, not a
+   fault.
+3. Set the window to bracket the current time (say, an hour either side).
+   Processing must start within a second or two, with no reload, in every open
+   tab.
+4. Set the *end* of the window to two minutes from now and wait. Processing must
+   stop on its own when the boundary passes — this is the timer, not a poll, so a
+   failure here looks like "it never stops".
+5. Set both fields to the same time. The line under the switch must say the clock
+   will never stop it, and processing must run at any hour.
+6. Switch **Only at night** off: the clock fields disappear and processing runs
+   whenever the master switch is on.
+7. **With the sensor** (optional, and most machines cannot do this): enable
+   `chrome://flags/#enable-generic-sensor-extra-classes`, relaunch Chrome, and
+   open the popup on a device that has a light sensor. The line should now read
+   `Light sensor: N lux, …`. Cover the sensor and confirm processing engages even
+   during the day; shine a light at it and confirm it stands down even at night.
+   Note the deliberate gap between 30 and 60 lux: near the boundary the previous
+   verdict is kept, so it should *not* flicker.
+8. Without the flag, confirm the popup says `No light sensor here, so the clock
+   decides` rather than implying a sensor is in use.
+
+## 13. Leaving music alone
+
+1. With **Leave music alone** on, open `music.youtube.com` and play a track. The
+   popup must report `Audio: left alone, this is a music service`. If the track
+   has a video, the picture should still be tone-mapped — the two halves are
+   independent on purpose.
+2. Do the same on `open.spotify.com` and on SoundCloud.
+3. Open plain `youtube.com` and play a film trailer: audio **must** be compressed.
+   This is the case the list is designed not to break.
+4. Find any page with an `<audio>` player (a podcast page will do): it should be
+   reported as music and left alone. This is the known false positive — a podcast
+   would benefit from compression.
+5. Switch the toggle off and confirm the same players are compressed again, live.
+6. On a page with both a film and a music player going at once, the status line
+   should read `compressing 1 player, 1 left as music`.
+
+## 14. Accessibility pass
 
 1. Open the popup and drive it with the keyboard only: `Tab` through master
-   toggle → slider → audio → video → reset. Every control must show a visible
-   focus ring.
-2. Toggle with `Space`, move the slider with arrows and `Home`/`End`.
-3. With VoiceOver (`Cmd+F5`), confirm the slider announces value and label
-   ("70 of 100, Strong") and that the status region is announced when it changes.
-4. Enable *Reduce motion* in macOS settings and confirm the toggles no longer
-   animate.
+   toggle → strength slider → link toggle → only-at-night → the two clock fields
+   → audio → video → night EQ → leave-music-alone → skip-site button → reset.
+   Every control must show a visible focus ring.
+2. Toggle with `Space`, move the slider with arrows and `Home`/`End`, and type or
+   arrow through the clock fields. Clearing a clock field and tabbing away must
+   restore the stored time rather than writing a broken window.
+3. With a screen reader, confirm the slider announces value and label ("70 of
+   100, Strong") and that the status region is announced when it changes. Check
+   that the skip-site button announces its *pressed* state, since its label does
+   not change between on and off.
+   - macOS: VoiceOver (`Cmd+F5`).
+   - Windows: NVDA or Narrator (`Win+Ctrl+Enter`). Tab to each control and
+     confirm the name, role and state are read.
+4. Enable *Reduce motion* (macOS System Settings, or Windows Settings →
+   Accessibility → Visual effects → Animation effects) and confirm the toggles no
+   longer animate.
+5. **Windows High Contrast** (Settings → Accessibility → Contrast themes, or
+   `Left Alt+Left Shift+PrtScn`): every switch must remain clearly on or off.
+   This is worth checking specifically, because the normal styling carries switch
+   state in `background` alone, which `forced-colors` discards — before the
+   `forced-colors` block was added, on and off looked identical here. Also
+   confirm the two graph thumbnails still have visible borders and that the
+   status dots remain distinguishable.
+6. Zoom the browser to 150% and 200% and confirm nothing in the popup is clipped
+   or overlapping.
 
 Full WCAG conformance cannot be established by these checks alone — it requires
 manual testing with assistive technologies across platforms and expert
 accessibility review.
+
+## 13. Popup layout budget
+
+Chrome caps a popup at 600 CSS px tall and scrolls past that, so the layout has a
+height budget. To check it without clicking through a browser:
+
+```bash
+npm run build
+node scripts/popup-shot.mjs 45 ./popup.png          # linked sliders
+SPLIT=1 NIGHT_EQ=1 node scripts/popup-shot.mjs 45   # the taller state
+```
+
+It prints the measured height, the height with the per-site button showing (the
+worst case), and whether that fits the cap. Current: 547 px linked, 553 px with
+the per-site button, 594 px with the sliders separated.

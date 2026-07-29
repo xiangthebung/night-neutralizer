@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  audioTransferDb,
   chromiumInternalMakeupDb,
   describeStrength,
   mapAudioStrength,
+  mapEqStrength,
+  mapSettings,
   mapStrength,
   mapVideoStrength,
   normalizeStrength,
 } from '../src/core/strength';
 import { dbToGain } from '../src/core/math';
+import { sanitizeSettings } from '../src/core/settings';
 import { isIdentitySoftClip } from '../src/core/soft-clip';
 import { DEFAULT_SETTINGS } from '../src/core/types';
 
@@ -270,6 +274,198 @@ describe('describeStrength', () => {
     expect(describeStrength(30)).toBe('Gentle');
     expect(describeStrength(45)).toBe('Balanced');
     expect(describeStrength(70)).toBe('Strong');
+    expect(describeStrength(85)).toBe('Very strong');
     expect(describeStrength(100)).toBe('Maximum');
+  });
+
+  it('only calls the very top of the range maximum', () => {
+    // "80 · maximum" next to a slider that is plainly not at the end reads as a
+    // bug in the readout.
+    expect(describeStrength(80)).not.toBe('Maximum');
+    expect(describeStrength(94)).not.toBe('Maximum');
+    expect(describeStrength(95)).toBe('Maximum');
+  });
+
+  it('never labels a non-zero strength as bypass', () => {
+    for (const strength of STEPS.slice(1)) {
+      expect(describeStrength(strength)).not.toBe('Bypass');
+    }
+  });
+});
+
+describe('mapEqStrength', () => {
+  it('is flat when the toggle is off', () => {
+    for (const strength of [0, 45, 100]) {
+      const eq = mapEqStrength(strength, false);
+      expect(eq.enabled).toBe(false);
+      expect(eq.lowShelfDb).toBe(0);
+      expect(eq.presenceDb).toBe(0);
+    }
+  });
+
+  it('is flat at strength 0 even when the toggle is on', () => {
+    // Strength 0 has to stay a true bypass whatever else is switched on.
+    const eq = mapEqStrength(0, true);
+    expect(eq.enabled).toBe(false);
+    expect(eq.lowShelfDb).toBe(0);
+    expect(eq.presenceDb).toBe(0);
+  });
+
+  it('cuts the low end and lifts presence, never the other way round', () => {
+    for (const strength of STEPS.slice(1)) {
+      const eq = mapEqStrength(strength, true);
+      expect(eq.lowShelfDb).toBeLessThan(0);
+      expect(eq.presenceDb).toBeGreaterThan(0);
+      // A narrow bell here would sound like a telephone.
+      expect(eq.presenceQ).toBeLessThan(1.5);
+      // Bass, not midrange, is what travels through walls.
+      expect(eq.lowShelfHz).toBeLessThan(300);
+      // Consonants, not sibilance.
+      expect(eq.presenceHz).toBeGreaterThan(1500);
+      expect(eq.presenceHz).toBeLessThan(5000);
+    }
+  });
+
+  it('grows monotonically with strength', () => {
+    let previousCut = 1;
+    let previousLift = -1;
+    for (const strength of STEPS) {
+      const eq = mapEqStrength(strength, true);
+      expect(eq.lowShelfDb).toBeLessThanOrEqual(previousCut);
+      expect(eq.presenceDb).toBeGreaterThanOrEqual(previousLift);
+      previousCut = eq.lowShelfDb;
+      previousLift = eq.presenceDb;
+    }
+  });
+
+  it('stays within a sane range at maximum', () => {
+    const eq = mapEqStrength(100, true);
+    expect(eq.lowShelfDb).toBeGreaterThan(-12);
+    expect(eq.presenceDb).toBeLessThan(6);
+  });
+});
+
+describe('night EQ in the audio chain', () => {
+  it('is carried on the audio params', () => {
+    expect(mapAudioStrength(60, false).eq.enabled).toBe(false);
+    expect(mapAudioStrength(60, true).eq.enabled).toBe(true);
+    expect(mapAudioStrength(0, true).eq.enabled).toBe(false);
+  });
+
+  it('pays for the presence lift out of make-up gain', () => {
+    // The lift sits before the compressor, so ignoring it would hand the
+    // limiter a signal hotter than the headroom model promises.
+    //
+    // Make-up gain cannot go negative, so at the very bottom of the range there
+    // is less of it than the lift costs and the compensation is only partial.
+    // The shortfall there is a fraction of a dB, well inside what the limiter
+    // and the soft clipper absorb.
+    for (const strength of [20, 45, 70, 100]) {
+      const plain = mapAudioStrength(strength, false);
+      const shaped = mapAudioStrength(strength, true);
+      const paid = plain.makeupGainDb - shaped.makeupGainDb;
+      expect(paid).toBeCloseTo(Math.min(plain.makeupGainDb, shaped.eq.presenceDb), 6);
+      expect(paid).toBeGreaterThan(0);
+    }
+  });
+
+  it('leaves at most a fraction of a dB of the lift uncompensated', () => {
+    for (const strength of STEPS.slice(1)) {
+      const plain = mapAudioStrength(strength, false);
+      const shaped = mapAudioStrength(strength, true);
+      const shortfall = shaped.eq.presenceDb - (plain.makeupGainDb - shaped.makeupGainDb);
+      expect(shortfall).toBeLessThan(0.5);
+      expect(shortfall).toBeGreaterThanOrEqual(-1e-9); // fp noise, not a real overshoot
+    }
+  });
+
+  it('never asks for negative make-up gain', () => {
+    for (const strength of STEPS) {
+      expect(mapAudioStrength(strength, true).makeupGainDb).toBeGreaterThanOrEqual(0);
+    }
+  });
+});
+
+describe('audioTransferDb', () => {
+  const LEVELS = [-60, -50, -40, -30, -20, -12, -6, -3, -1, 0];
+
+  it('is the identity when bypassed', () => {
+    const params = mapAudioStrength(0);
+    for (const level of LEVELS) {
+      expect(audioTransferDb(params, level)).toBeCloseTo(level, 10);
+    }
+  });
+
+  it('never exceeds the soft clipper ceiling', () => {
+    for (const strength of STEPS) {
+      for (const nightEq of [false, true]) {
+        const params = mapAudioStrength(strength, nightEq);
+        const ceilingDb = 20 * Math.log10(params.safety.ceiling);
+        for (const level of LEVELS) {
+          expect(audioTransferDb(params, level)).toBeLessThanOrEqual(ceilingDb + 1e-9);
+        }
+      }
+    }
+  });
+
+  it('is monotonic: louder in is never quieter out', () => {
+    for (const strength of [15, 45, 75, 100]) {
+      const params = mapAudioStrength(strength);
+      for (let index = 1; index < LEVELS.length; index++) {
+        const previous = audioTransferDb(params, LEVELS[index - 1] as number);
+        const current = audioTransferDb(params, LEVELS[index] as number);
+        expect(current).toBeGreaterThanOrEqual(previous - 1e-9);
+      }
+    }
+  });
+
+  it('lifts quiet material and holds loud material down', () => {
+    const params = mapAudioStrength(70);
+    expect(audioTransferDb(params, -45)).toBeGreaterThan(-45);
+    expect(audioTransferDb(params, 0)).toBeLessThan(0);
+  });
+
+  it('shrinks the dynamic range further as strength rises', () => {
+    let previousRange = Number.POSITIVE_INFINITY;
+    for (const strength of [10, 30, 50, 70, 90, 100]) {
+      const params = mapAudioStrength(strength);
+      const range = audioTransferDb(params, -6) - audioTransferDb(params, -45);
+      expect(range).toBeLessThan(previousRange);
+      expect(range).toBeGreaterThan(0);
+      previousRange = range;
+    }
+  });
+});
+
+describe('mapSettings', () => {
+  it('drives both halves from the master value while linked', () => {
+    const settings = sanitizeSettings({
+      strength: 80,
+      linked: true,
+      audioStrength: 5,
+      videoStrength: 5,
+    });
+    const params = mapSettings(settings);
+    expect(params.audio).toEqual(mapAudioStrength(80, false));
+    expect(params.video).toEqual(mapVideoStrength(80));
+  });
+
+  it('honours the per-channel values once unlinked', () => {
+    const settings = sanitizeSettings({
+      strength: 80,
+      linked: false,
+      audioStrength: 90,
+      videoStrength: 0,
+    });
+    const params = mapSettings(settings);
+    expect(params.audio).toEqual(mapAudioStrength(90, false));
+    // Video at 0 must be a genuine bypass even with audio at full strength.
+    expect(params.video.bypass).toBe(true);
+    expect(params.audio.bypass).toBe(false);
+  });
+
+  it('passes the night EQ switch through', () => {
+    const settings = sanitizeSettings({ strength: 50, nightEq: true });
+    expect(mapSettings(settings).audio.eq.enabled).toBe(true);
   });
 });

@@ -23,6 +23,18 @@
   box-sizing: border-box;
 }
 
+/*
+ * The `hidden` attribute is nothing but a UA `display: none` rule, so any author
+ * rule that sets `display` on the same element defeats it silently. That is how
+ * the shortcut hint ended up rendering an empty key pill on profiles with no
+ * accelerator bound, despite the script having hidden it. Everything in this
+ * popup that toggles visibility does it through `hidden`, so it is enforced once
+ * here rather than remembered at each call site.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -33,12 +45,17 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/*
+ * Chrome caps a popup at 600 CSS px tall and scrolls past that, so the layout
+ * budget is real: the density here is chosen to fit the whole panel, including
+ * the per-site button when it appears, without a scrollbar.
+ */
 .app {
   width: 330px;
-  padding: 12px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 /* ---------- header ---------- */
@@ -82,28 +99,16 @@ h1 {
   letter-spacing: 0.01em;
 }
 
-.tagline {
-  margin: 1px 0 0;
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.intro {
-  margin: 0;
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-
 /* ---------- cards ---------- */
 
 .card {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 10px 12px;
+  padding: 7px 10px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 5px;
 }
 
 .row {
@@ -126,33 +131,86 @@ h1 {
   color: var(--accent);
 }
 
-.help {
+/* Available to screen readers, takes no layout space. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/*
+ * Live previews of both halves of the effect. Two columns rather than one, so
+ * the audio side is as legible as the video side: a slider labelled "45" says
+ * nothing about what it does to a quiet line of dialogue.
+ */
+.previews {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.preview {
   margin: 0;
+  min-width: 0;
+}
+
+/*
+ * The caption, not the curve, is what tells you what the setting does. An
+ * unlabelled curve with "in → out" underneath is legible to whoever wrote it and
+ * opaque to everyone else, so these lines state the change in numbers and the
+ * graph above them becomes the supporting detail.
+ */
+.reading {
+  display: flex;
+  flex-direction: column;
+  margin: 3px 0 0;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The backing store is twice the layout size, and the drawing code works in
+ * logical units, so the curves stay crisp on hidpi displays.
+ */
+.curve {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0c111b;
+}
+
+/* ---------- keyboard shortcut hint ---------- */
+
+.shortcut {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: -2px 0 0;
   font-size: 11px;
   color: var(--text-dim);
 }
 
-.scale {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  color: var(--idle);
-}
-
-/* Live preview of the video tone curve for the selected strength. */
-.explain {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-}
-
-.curve {
-  flex: none;
-  width: 68px;
-  height: 48px;
+kbd {
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #0c111b;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
 }
 
 /* ---------- range ---------- */
@@ -211,7 +269,7 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .toggle {
   justify-content: space-between;
-  padding: 5px 0;
+  padding: 2px 0;
 }
 
 .toggle + .toggle {
@@ -234,9 +292,67 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   font-weight: 600;
 }
 
+/*
+ * Audio and Video need no explaining once the two graphs above are visible, so
+ * their note sits inline on the same row instead of costing a second line. Only
+ * Night EQ, whose name does not say what it does, keeps a full description.
+ */
+.toggle-hint {
+  margin-left: 7px;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
 .toggle-desc {
   font-size: 10.5px;
   color: var(--text-dim);
+}
+
+/* ---------- night window ---------- */
+
+/*
+ * The two clock fields sit on one line under the "only at night" switch rather
+ * than in labelled rows of their own: the popup has a 600 px height budget and
+ * "From 21:00 to 07:00" needs no more explaining than that.
+ */
+.window-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+input[type="time"] {
+  flex: none;
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 2px 4px;
+}
+
+input[type="time"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+/* The spin/clear affordances Chrome adds are dead weight at this size. */
+input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+  cursor: pointer;
+}
+
+@media (forced-colors: active) {
+  input[type="time"] {
+    border-color: ButtonText;
+  }
 }
 
 .switch input,
@@ -337,13 +453,70 @@ input:focus-visible ~ .track {
   white-space: pre-line;
 }
 
+/* ---------- per-site exclusion ---------- */
+
+/*
+ * The per-site switch shares the status card's title row rather than taking a
+ * row of its own, because the popup has a hard 600 px height budget and this
+ * button is not worth 30 px of it.
+ */
+.status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.site-button {
+  flex: none;
+  max-width: 150px;
+  padding: 3px 7px;
+  font: inherit;
+  font-size: 10.5px;
+  text-align: right;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.site-button #site-toggle-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-button:hover {
+  color: var(--text);
+  border-color: #33405a;
+}
+
+.site-button[data-state="excluded"] {
+  color: var(--accent);
+  border-color: #6a5836;
+  background: var(--accent-dim);
+}
+
+.site-button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 /* ---------- footer ---------- */
 
+/*
+ * One row rather than three stacked lines. The privacy note and the reset link
+ * are both short, and the popup's height budget is better spent on the controls.
+ */
 .footer {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  align-items: flex-start;
+  flex-direction: row;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 2px;
 }
 
 .link-button {
@@ -368,13 +541,95 @@ input:focus-visible ~ .track {
   border-radius: 4px;
 }
 
+.link-button.wide {
+  align-self: flex-start;
+  font-size: 11px;
+}
+
 .privacy {
   font-size: 10px;
   color: var(--idle);
 }
 
+/* Transient confirmation for actions with no other visible result. */
+.toast {
+  font-size: 10.5px;
+  color: var(--accent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+  }
+}
+
+/*
+ * Windows High Contrast / forced-colors.
+ *
+ * Every switch in this UI conveys its state through `background` alone, and
+ * forced-colors throws author backgrounds away. Without this block the toggles
+ * still render but on and off look identical, which makes the whole popup
+ * unusable in that mode. The fix is to carry the state in the border and in the
+ * thumb's fill, both of which map onto system colour keywords.
+ */
+@media (forced-colors: active) {
+  .track {
+    background: Canvas;
+    border: 1px solid ButtonText;
+    forced-color-adjust: none;
+  }
+
+  .thumb {
+    background: ButtonText;
+  }
+
+  input:checked ~ .track {
+    background: Highlight;
+    border-color: Highlight;
+  }
+
+  input:checked ~ .track .thumb {
+    background: HighlightText;
+  }
+
+  input:focus-visible ~ .track {
+    outline: 2px solid CanvasText;
+    outline-offset: 2px;
+    box-shadow: none;
+  }
+
+  .dot {
+    forced-color-adjust: none;
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+
+  .dot[data-state="active"] {
+    background: Highlight;
+    box-shadow: none;
+  }
+
+  /* "Partial" has to stay distinguishable from both other states without
+     colour, so it gets a half-filled look via a thick ring. */
+  .dot[data-state="partial"] {
+    background: Canvas;
+    border-width: 3px;
+  }
+
+  .curve {
+    border-color: CanvasText;
+  }
+
+  .site-button[data-state="excluded"] {
+    background: Highlight;
+    color: HighlightText;
+  }
+
+  /* Opacity is the only cue for the paused state, and it survives
+     forced-colors poorly. Say it in text instead. */
+  .app[data-paused="true"] #controls,
+  .app[data-paused="true"] .card:not(.status):not(#controls) {
+    opacity: 1;
+    border-style: dashed;
   }
 }

@@ -3,11 +3,19 @@
  * running its own copy of the content script. The popup shows one summary, so
  * the per-frame reports are merged here. Pure module, unit tested.
  */
-import type { AudioState, FrameStatus, TabStatus, VideoMode } from './types';
+import type {
+  AudioState,
+  FrameStatus,
+  GateReason,
+  GateSource,
+  TabStatus,
+  VideoMode,
+} from './types';
 
 const AUDIO_PRIORITY: AudioState[] = [
   'active',
   'blocked',
+  'music',
   'bypassed',
   'unsupported',
   'idle',
@@ -15,6 +23,15 @@ const AUDIO_PRIORITY: AudioState[] = [
 ];
 
 const VIDEO_PRIORITY: VideoMode[] = ['adaptive', 'static', 'unsupported', 'off'];
+
+/**
+ * `active` first: one frame doing work is the headline whatever the others say
+ * (an excluded top-level page can still host a player from a host that is not
+ * excluded). The rest run most decisive first, matching `core/gate.ts`.
+ */
+const GATE_PRIORITY: GateReason[] = ['active', 'off', 'site', 'daylight', 'daytime'];
+
+const GATE_SOURCE_PRIORITY: GateSource[] = ['sensor', 'clock', 'none'];
 
 function pick<T>(values: readonly T[], priority: readonly T[], fallback: T): T {
   for (const candidate of priority) {
@@ -29,6 +46,10 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
   if (frames.length === 0) {
     return {
       frames: 0,
+      site: '',
+      siteDisabled: false,
+      gate: { active: false, reason: 'off', source: 'none', lux: null },
+      music: { site: false, skipped: 0 },
       mediaElements: 0,
       audio: { state: 'off', processed: 0, skipped: 0 },
       video: { mode: 'off', elements: 0, technique: 'none' },
@@ -42,9 +63,21 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
   let skipped = 0;
   let videoElements = 0;
   let newest = 0;
+  // The top frame is authoritative for the site: sub-frames report the same
+  // top-level host, but only if `ancestorOrigins` was available to them.
+  let site = '';
+  let siteDisabled = false;
+  let musicSite = false;
+  let musicSkipped = 0;
+  // The light sensor can only be read by a top-level frame, so its reading is
+  // taken from the top frame when one reported and from anywhere otherwise.
+  let lux: number | null = null;
+  let luxFromTop = false;
   const audioStates: AudioState[] = [];
   const videoModes: VideoMode[] = [];
   const techniques: FrameStatus['video']['technique'][] = [];
+  const gateReasons: GateReason[] = [];
+  const gateSources: GateSource[] = [];
   const notes = new Set<string>();
 
   for (const frame of frames) {
@@ -56,11 +89,32 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
     audioStates.push(frame.audio.state);
     videoModes.push(frame.video.mode);
     techniques.push(frame.video.technique);
+    gateReasons.push(frame.gate.reason);
+    gateSources.push(frame.gate.source);
+    if (frame.gate.lux !== null && (!luxFromTop || frame.top)) {
+      lux = frame.gate.lux;
+      luxFromTop = luxFromTop || frame.top;
+    }
+    if (frame.music.site) musicSite = true;
+    musicSkipped += frame.music.skipped;
+    if (frame.site && (!site || frame.top)) site = frame.site;
+    if (frame.siteDisabled) siteDisabled = true;
     for (const note of frame.notes) notes.add(note);
   }
 
+  const gateReason = pick(gateReasons, GATE_PRIORITY, 'off');
+
   return {
     frames: frames.length,
+    site,
+    siteDisabled,
+    gate: {
+      active: gateReason === 'active',
+      reason: gateReason,
+      source: pick(gateSources, GATE_SOURCE_PRIORITY, 'none'),
+      lux,
+    },
+    music: { site: musicSite, skipped: musicSkipped },
     mediaElements,
     audio: {
       state: pick(audioStates, AUDIO_PRIORITY, 'off'),
