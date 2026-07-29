@@ -3,19 +3,29 @@
  *
  * Signal chain per media element:
  *
- *   MediaElementSource -> preGain -> DynamicsCompressor -> makeupGain
- *                      -> limiter (DynamicsCompressor, ratio 20) -> destination
+ *   MediaElementSource -> preGain -> lowShelf -> presence
+ *                      -> DynamicsCompressor -> makeupGain
+ *                      -> limiter (DynamicsCompressor, ratio 20)
+ *                      -> safetyTrim -> softClip (WaveShaper) -> destination
  *
  * Why this shape:
  *  - `preGain` pushes quiet dialogue into the compressor knee, which is what
  *    makes whispered speech audible without touching the loud parts.
+ *  - `lowShelf` and `presence` are the optional night EQ. They sit *before* the
+ *    compressor so the compressor sees and controls the boosted presence band
+ *    rather than being surprised by it. Both are flat when the toggle is off, so
+ *    the nodes never have to be added to or removed from a live graph.
  *  - the main compressor does the range reduction with a soft knee and a
  *    release that lengthens with strength (short releases cause pumping).
  *  - `makeupGain` restores perceived loudness; it is computed analytically in
- *    `core/strength.ts` so peaks land near -3 dBFS.
- *  - the limiter is a second compressor with a high ratio, ~3 ms attack and a
- *    -1.5 dB threshold. It only catches transients that slip past the slower
- *    main stage, so it adds no audible character.
+ *    `core/strength.ts` so steady-state peaks land at or below -4 dBFS.
+ *  - the limiter is a second compressor with a high ratio, a 2 ms attack and a
+ *    threshold that tightens to -2 dB at full strength. It only catches
+ *    transients that slip past the slower main stage, so it adds no audible
+ *    character.
+ *  - `safetyTrim` + `softClip` are the last line of defence for transients that
+ *    outrun even the limiter's attack, so the sink never sees a sample above
+ *    the ceiling.
  *
  * Total added latency is the two compressors' internal look-ahead (~12 ms in
  * Chromium), constant and well below the A/V sync threshold.
@@ -31,10 +41,12 @@
  *  - Element `volume`/`muted` are applied by the element before the graph, so
  *    site volume sliders, mute buttons and keyboard shortcuts keep working.
  */
-import type { AudioParams, AudioState, SoftClipParams } from '../core/types';
+import type { AudioParams, AudioState, EqParams, SoftClipParams } from '../core/types';
 import { dbToGain } from '../core/math';
 import { IDENTITY_SOFT_CLIP, buildSoftClipCurve } from '../core/soft-clip';
+import { neutralEqParams } from '../core/strength';
 import { classifyElement, type MediaOriginClass } from '../core/media-origin';
+import { isMusicMedia } from '../core/music';
 import { debug } from '../core/log';
 
 /** Chromium historically caps concurrent AudioContexts; stay well under it. */
@@ -52,6 +64,9 @@ interface Graph {
   context: AudioContext;
   source: MediaElementAudioSourceNode;
   preGain: GainNode;
+  /** Night EQ: low shelf then presence bell. Flat unless the toggle is on. */
+  lowShelf: BiquadFilterNode;
+  presence: BiquadFilterNode;
   compressor: DynamicsCompressorNode;
   makeupGain: GainNode;
   limiter: DynamicsCompressorNode;
@@ -265,6 +280,10 @@ class ElementAudioProcessor {
     try {
       const source = context.createMediaElementSource(this.element);
       const preGain = context.createGain();
+      const lowShelf = context.createBiquadFilter();
+      lowShelf.type = 'lowshelf';
+      const presence = context.createBiquadFilter();
+      presence.type = 'peaking';
       const compressor = context.createDynamicsCompressor();
       const makeupGain = context.createGain();
       const limiter = context.createDynamicsCompressor();
@@ -277,7 +296,9 @@ class ElementAudioProcessor {
       analyser.fftSize = 1024;
 
       source.connect(preGain);
-      preGain.connect(compressor);
+      preGain.connect(lowShelf);
+      lowShelf.connect(presence);
+      presence.connect(compressor);
       compressor.connect(makeupGain);
       makeupGain.connect(limiter);
       limiter.connect(safetyTrim);
@@ -291,6 +312,8 @@ class ElementAudioProcessor {
         context,
         source,
         preGain,
+        lowShelf,
+        presence,
         compressor,
         makeupGain,
         limiter,
@@ -344,6 +367,7 @@ class ElementAudioProcessor {
     if (!params || params.bypass) {
       rampParam(graph.preGain.gain, 1, now, seconds);
       rampParam(graph.makeupGain.gain, 1, now, seconds);
+      this.applyEq(neutralEqParams(), now, seconds);
       for (const node of [graph.compressor, graph.limiter]) {
         rampParam(node.threshold, 0, now, seconds);
         rampParam(node.knee, 0, now, seconds);
@@ -357,6 +381,7 @@ class ElementAudioProcessor {
 
     rampParam(graph.preGain.gain, dbToGain(params.preGainDb), now, seconds);
     rampParam(graph.makeupGain.gain, dbToGain(params.makeupGainDb), now, seconds);
+    this.applyEq(params.eq, now, seconds);
 
     rampParam(graph.compressor.threshold, params.compressor.thresholdDb, now, seconds);
     rampParam(graph.compressor.knee, params.compressor.kneeDb, now, seconds);
@@ -371,6 +396,21 @@ class ElementAudioProcessor {
     rampParam(graph.limiter.release, params.limiter.release, now, seconds);
 
     this.applySafety(params.safety, now, seconds);
+  }
+
+  /**
+   * Night EQ. Gains are ramped rather than set, because a step change in filter
+   * gain during playback is audible as a click. Frequency and Q are ramped too
+   * for the same reason, even though in practice they never move.
+   */
+  private applyEq(eq: EqParams, now: number, seconds: number): void {
+    const graph = this.graph;
+    if (!graph) return;
+    rampParam(graph.lowShelf.frequency, eq.lowShelfHz, now, seconds);
+    rampParam(graph.lowShelf.gain, eq.lowShelfDb, now, seconds);
+    rampParam(graph.presence.frequency, eq.presenceHz, now, seconds);
+    rampParam(graph.presence.Q, eq.presenceQ, now, seconds);
+    rampParam(graph.presence.gain, eq.presenceDb, now, seconds);
   }
 
   /**
@@ -479,6 +519,8 @@ class ElementAudioProcessor {
       try {
         graph.source.disconnect();
         graph.preGain.disconnect();
+        graph.lowShelf.disconnect();
+        graph.presence.disconnect();
         graph.compressor.disconnect();
         graph.makeupGain.disconnect();
         graph.limiter.disconnect();
@@ -513,13 +555,24 @@ export interface AudioEngineStatus {
   state: AudioState;
   processed: number;
   skipped: number;
+  /** Elements deliberately left uncompressed because they are playing music. */
+  music: number;
   notes: string[];
 }
+
+/** Whether to leave music alone, and whether this frame's host is a music service. */
+export interface MusicPolicy {
+  skip: boolean;
+  site: boolean;
+}
+
+const NO_MUSIC_POLICY: MusicPolicy = { skip: false, site: false };
 
 export class AudioEngine {
   private readonly processors = new Map<HTMLMediaElement, ElementAudioProcessor>();
   private params: AudioParams | null = null;
   private enabled = false;
+  private music: MusicPolicy = NO_MUSIC_POLICY;
 
   constructor(
     private readonly pageOrigin: string,
@@ -530,7 +583,7 @@ export class AudioEngine {
     if (this.processors.has(element)) return;
     const processor = new ElementAudioProcessor(element, this.pageOrigin, this.onStatusChange);
     this.processors.set(element, processor);
-    processor.update(this.enabled ? this.params : null);
+    processor.update(this.paramsFor(element));
   }
 
   remove(element: HTMLMediaElement): void {
@@ -541,23 +594,68 @@ export class AudioEngine {
     this.onStatusChange();
   }
 
-  setParams(params: AudioParams, enabled: boolean): void {
+  /**
+   * The music policy is a parameter of this call rather than a separate setter,
+   * because the two are one decision: an engine holding fresh params and a stale
+   * policy would compress exactly the thing the policy exists to protect.
+   */
+  setParams(params: AudioParams, enabled: boolean, music: MusicPolicy = NO_MUSIC_POLICY): void {
     this.params = params;
     this.enabled = enabled;
-    for (const processor of this.processors.values()) {
-      processor.update(enabled ? params : null);
+    this.music = music;
+    this.applyAll();
+  }
+
+  /**
+   * Re-run the per-element decision without a settings change.
+   *
+   * Needed because whether an element is music can only be answered once its
+   * metadata has loaded: a `<video>` is 0x0 until then, and an ad break can swap
+   * a picture in where there was none. The caller drives this from the media
+   * events it already listens for.
+   */
+  refresh(): void {
+    this.applyAll();
+  }
+
+  private applyAll(): void {
+    for (const [element, processor] of this.processors) {
+      processor.update(this.paramsFor(element));
     }
+  }
+
+  /** Params this element should run with, or null for "leave it alone". */
+  private paramsFor(element: HTMLMediaElement): AudioParams | null {
+    if (!this.enabled || !this.params) return null;
+    return this.isMusic(element) ? null : this.params;
+  }
+
+  private isMusic(element: HTMLMediaElement): boolean {
+    if (!this.music.skip) return false;
+    const video = element as HTMLVideoElement;
+    return isMusicMedia(
+      {
+        tagName: element.tagName,
+        readyState: element.readyState,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+      },
+      this.music.site,
+    );
   }
 
   getStatus(): AudioEngineStatus {
     let processed = 0;
     let skipped = 0;
+    let music = 0;
     let blocked = false;
     let unsupported = false;
     let bypassed = false;
     const notes = new Set<string>();
+    const engaged = this.enabled && Boolean(this.params) && !this.params?.bypass;
 
-    for (const processor of this.processors.values()) {
+    for (const [element, processor] of this.processors) {
+      if (engaged && this.isMusic(element)) music++;
       const state = processor.getState();
       if (state === 'active') processed++;
       if (state === 'blocked') {
@@ -574,14 +672,17 @@ export class AudioEngine {
     }
 
     let state: AudioState;
-    if (!this.enabled || !this.params || this.params.bypass) state = 'off';
+    if (!engaged) state = 'off';
     else if (processed > 0) state = 'active';
     else if (blocked) state = 'blocked';
+    // Ahead of 'bypassed': a music element that already has a graph reports
+    // itself bypassed, which is true but says nothing about why.
+    else if (music > 0) state = 'music';
     else if (unsupported) state = 'unsupported';
     else if (bypassed) state = 'bypassed';
     else state = 'idle';
 
-    return { state, processed, skipped, notes: [...notes] };
+    return { state, processed, skipped, music, notes: [...notes] };
   }
 
   destroy(): void {

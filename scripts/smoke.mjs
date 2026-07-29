@@ -29,10 +29,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
+import { findChrome } from './find-chrome.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CHROME =
-  process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+
 /** Ask the OS for a port nobody else is using. */
 async function freePort() {
   const { createServer } = await import('node:net');
@@ -83,7 +83,7 @@ async function bundleStrengthMapping() {
   const result = await esbuild.build({
     stdin: {
       contents: `
-        export { mapAudioStrength } from './src/core/strength';
+        export { mapAudioStrength, mapEqStrength, audioTransferDb } from './src/core/strength';
         export { buildSoftClipCurve, isIdentitySoftClip } from './src/core/soft-clip';
       `,
       resolveDir: root,
@@ -110,10 +110,10 @@ async function bundleStrengthMapping() {
  *   4.0-7.0 s  steady full-scale tone              (loud music)
  */
 const DSP_HARNESS = `
-window.__nnMeasureChain = async function (strength) {
+window.__nnMeasureChain = async function (strength, nightEq) {
   const sr = 48000;
   const seconds = 7;
-  const params = NNCore.mapAudioStrength(strength);
+  const params = NNCore.mapAudioStrength(strength, nightEq === true);
   const db = (amplitude) => 20 * Math.log10(Math.max(amplitude, 1e-9));
   const gain = (decibels) => Math.pow(10, decibels / 20);
 
@@ -132,6 +132,16 @@ window.__nnMeasureChain = async function (strength) {
 
   const pre = ctx.createGain();
   pre.gain.value = gain(params.preGainDb);
+  // Night EQ, in the same position as the content script puts it.
+  const lowShelf = ctx.createBiquadFilter();
+  lowShelf.type = 'lowshelf';
+  lowShelf.frequency.value = params.eq.lowShelfHz;
+  lowShelf.gain.value = params.eq.lowShelfDb;
+  const presence = ctx.createBiquadFilter();
+  presence.type = 'peaking';
+  presence.frequency.value = params.eq.presenceHz;
+  presence.Q.value = params.eq.presenceQ;
+  presence.gain.value = params.eq.presenceDb;
   const comp = ctx.createDynamicsCompressor();
   comp.threshold.value = params.compressor.thresholdDb;
   comp.knee.value = params.compressor.kneeDb;
@@ -155,7 +165,9 @@ window.__nnMeasureChain = async function (strength) {
   shaper.curve = NNCore.buildSoftClipCurve(params.safety);
 
   source.connect(pre);
-  pre.connect(comp);
+  pre.connect(lowShelf);
+  lowShelf.connect(presence);
+  presence.connect(comp);
   comp.connect(makeup);
   makeup.connect(limiter);
   limiter.connect(trim);
@@ -188,6 +200,127 @@ window.__nnMeasureChain = async function (strength) {
     loud: window_(6, 6.9),           // settled loud passage
     globalPeakDb: db(globalPeak),
     globalPeakLinear: globalPeak,
+  };
+};
+
+/**
+ * The night EQ section on its own, measured at three frequencies: rumble, the
+ * body of the mix, and the consonant band. Proves the filters do what the popup
+ * copy claims rather than just that they exist.
+ */
+window.__nnMeasureEq = async function (strength) {
+  const sr = 48000;
+  const seconds = 1;
+  const params = NNCore.mapEqStrength(strength, true);
+  const db = (amplitude) => 20 * Math.log10(Math.max(amplitude, 1e-9));
+
+  const measure = async (frequency, engaged) => {
+    const ctx = new OfflineAudioContext(1, sr * seconds, sr);
+    const buffer = ctx.createBuffer(1, sr * seconds, sr);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i++) {
+      data[i] = Math.sin(2 * Math.PI * frequency * (i / sr)) * 0.25;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+
+    const lowShelf = ctx.createBiquadFilter();
+    lowShelf.type = 'lowshelf';
+    lowShelf.frequency.value = params.lowShelfHz;
+    lowShelf.gain.value = engaged ? params.lowShelfDb : 0;
+    const presence = ctx.createBiquadFilter();
+    presence.type = 'peaking';
+    presence.frequency.value = params.presenceHz;
+    presence.Q.value = params.presenceQ;
+    presence.gain.value = engaged ? params.presenceDb : 0;
+
+    source.connect(lowShelf);
+    lowShelf.connect(presence);
+    presence.connect(ctx.destination);
+    source.start();
+
+    const out = (await ctx.startRendering()).getChannelData(0);
+    // Skip the filter's settling time.
+    let sum = 0;
+    const from = Math.floor(sr * 0.3);
+    for (let i = from; i < out.length; i++) sum += out[i] * out[i];
+    return db(Math.sqrt(sum / (out.length - from)));
+  };
+
+  const at = async (frequency) => (await measure(frequency, true)) - (await measure(frequency, false));
+  return {
+    lowDb: await at(60),
+    midDb: await at(700),
+    presenceDb: await at(params.presenceHz),
+    params,
+  };
+};
+
+/**
+ * Steady-state level in vs level out, rendered rather than modelled. This is the
+ * check that keeps the popup's audio graph honest: audioTransferDb() is an
+ * analytical model of the same chain, and if the two drift apart the picture in
+ * the popup stops describing the thing the user is hearing.
+ */
+window.__nnMeasureSteady = async function (strength, inputDb) {
+  const sr = 48000;
+  const seconds = 4;
+  const params = NNCore.mapAudioStrength(strength, false);
+  const gain = (decibels) => Math.pow(10, decibels / 20);
+  const db = (amplitude) => 20 * Math.log10(Math.max(amplitude, 1e-9));
+
+  const ctx = new OfflineAudioContext(1, sr * seconds, sr);
+  const buffer = ctx.createBuffer(1, sr * seconds, sr);
+  const data = buffer.getChannelData(0);
+  const amplitude = gain(inputDb);
+  for (let i = 0; i < data.length; i++) {
+    data[i] = Math.sin(2 * Math.PI * 300 * (i / sr)) * amplitude;
+  }
+
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  const pre = ctx.createGain();
+  pre.gain.value = gain(params.preGainDb);
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = params.compressor.thresholdDb;
+  comp.knee.value = params.compressor.kneeDb;
+  comp.ratio.value = params.compressor.ratio;
+  comp.attack.value = params.compressor.attack;
+  comp.release.value = params.compressor.release;
+  const makeup = ctx.createGain();
+  makeup.gain.value = gain(params.makeupGainDb);
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = params.limiter.thresholdDb;
+  limiter.knee.value = params.limiter.kneeDb;
+  limiter.ratio.value = params.limiter.ratio;
+  limiter.attack.value = params.limiter.attack;
+  limiter.release.value = params.limiter.release;
+  const trim = ctx.createGain();
+  trim.gain.value = 1 / Math.max(1, params.safety.headroom);
+  const shaper = ctx.createWaveShaper();
+  shaper.oversample = 'none';
+  shaper.curve = NNCore.buildSoftClipCurve(params.safety);
+
+  source.connect(pre);
+  pre.connect(comp);
+  comp.connect(makeup);
+  makeup.connect(limiter);
+  limiter.connect(trim);
+  trim.connect(shaper);
+  shaper.connect(ctx.destination);
+  source.start();
+
+  const out = (await ctx.startRendering()).getChannelData(0);
+  // Last second only: fully settled, so it is comparable with a steady-state
+  // model.
+  let peak = 0;
+  const from = Math.floor(sr * (seconds - 1));
+  for (let i = from; i < out.length; i++) peak = Math.max(peak, Math.abs(out[i]));
+
+  return {
+    inputDb,
+    measuredDb: db(peak),
+    modelDb: NNCore.audioTransferDb(params, inputDb),
   };
 };
 
@@ -445,8 +578,11 @@ async function main() {
     env: { ...process.env, PORT: String(pagePort) },
   });
 
+  const chromePath = findChrome();
+  console.log(`using ${chromePath}`);
+
   const chrome = spawn(
-    CHROME,
+    chromePath,
     [
       '--headless=new',
       `--remote-debugging-port=${CDP_PORT}`,
@@ -497,16 +633,61 @@ async function main() {
     const sw = await new Cdp(swTarget.webSocketDebuggerUrl).connect();
     await sw.send('Runtime.enable');
 
+    /** Local wall-clock minutes since midnight, the unit the night window uses. */
+    const nowMinutes = () => {
+      const now = new Date();
+      return now.getHours() * 60 + now.getMinutes();
+    };
+    const shiftMinutes = (delta) => (((nowMinutes() + delta) % 1440) + 1440) % 1440;
+
+    /**
+     * Write a whole settings object, merged over the shipped defaults.
+     *
+     * The two night/music defaults are deliberately switched off in this base:
+     * shipped defaults process only between 21:00 and 07:00 and leave audio-only
+     * players alone, so a suite run at 3 p.m. would otherwise be measuring an
+     * extension that is correctly doing nothing. Both are exercised explicitly
+     * further down.
+     */
+    const writeSettings = async (patch) => {
+      const settings = JSON.stringify({
+        enabled: true,
+        strength: 45,
+        linked: true,
+        audioStrength: 45,
+        videoStrength: 45,
+        audio: true,
+        video: true,
+        nightEq: false,
+        disabledSites: [],
+        nightOnly: false,
+        nightStart: 21 * 60,
+        nightEnd: 7 * 60,
+        skipMusic: false,
+        ...patch,
+      });
+      await sw.eval(`chrome.storage.sync.set({ settings: ${settings} })`);
+    };
+
+    // Before the page opens, so the first assertions below are not racing the
+    // night gate.
+    await writeSettings({});
+
     const commands = await sw.eval(
       `chrome.commands.getAll().then((list) => JSON.stringify(list))`,
     );
     const toggleCommand = JSON.parse(commands ?? '[]').find(
       (command) => command.name === 'toggle-enabled',
     );
+    // An extension side-loaded over CDP into a throwaway profile does not get
+    // its suggested accelerator assigned, so the binding itself cannot be
+    // asserted here. What can be asserted is that the command is declared and
+    // carries a description, which is what chrome://extensions/shortcuts shows.
+    const shortcutBound = Boolean(toggleCommand?.shortcut);
     check(
-      'keyboard shortcut is registered and bound',
-      Boolean(toggleCommand?.shortcut),
-      `${toggleCommand?.shortcut ?? 'unbound'} — ${toggleCommand?.description ?? ''}`,
+      'keyboard shortcut command is declared and described',
+      Boolean(toggleCommand) && Boolean(toggleCommand.description),
+      `${toggleCommand?.shortcut || 'unbound in this profile'} — ${toggleCommand?.description ?? ''}`,
     );
 
     /* -------- content script on the test page -------- */
@@ -727,9 +908,7 @@ async function main() {
     };
 
     const setStrength = async (strength) => {
-      await sw.eval(
-        `chrome.storage.sync.set({ settings: { enabled: true, strength: ${strength}, audio: true, video: true } })`,
-      );
+      await writeSettings({ strength });
       await sleep(2500); // let the loop push a curve and the adaptation settle
     };
 
@@ -935,10 +1114,49 @@ async function main() {
       `${latency.ms.toFixed(2)} ms (${latency.samples} samples at 48 kHz)`,
     );
 
-    /* -------- live settings updates -------- */
-    await sw.eval(
-      `chrome.storage.sync.set({ settings: { enabled: true, strength: 0, audio: true, video: true } })`,
+    /* -------- night EQ, measured -------- */
+    const eqOff = await page.eval(`__nnMeasureEq(0)`);
+    const eq = await page.eval(`__nnMeasureEq(70)`);
+    check(
+      'night EQ shelves the low end down and lifts dialogue presence',
+      eq.lowDb < -3 && eq.presenceDb > 1.5 && Math.abs(eq.midDb) < 1.5,
+      `60 Hz ${eq.lowDb.toFixed(2)} dB, 700 Hz ${eq.midDb.toFixed(2)} dB, ` +
+        `${Math.round(eq.params.presenceHz)} Hz +${eq.presenceDb.toFixed(2)} dB`,
     );
+    check(
+      'night EQ is flat at strength 0',
+      Math.abs(eqOff.lowDb) < 0.01 && Math.abs(eqOff.presenceDb) < 0.01,
+      `60 Hz ${eqOff.lowDb.toFixed(3)} dB, presence ${eqOff.presenceDb.toFixed(3)} dB`,
+    );
+
+    const eqDsp = await page.eval(`__nnMeasureChain(100, true)`);
+    check(
+      'the burst still never clips with night EQ engaged',
+      eqDsp.globalPeakLinear <= 1,
+      `worst peak ${eqDsp.globalPeakDb.toFixed(2)} dBFS at strength 100 with EQ on`,
+    );
+
+    /* -------- the popup's audio graph describes the real chain -------- */
+    // `audioTransferDb()` is what the popup plots. It is a steady-state model,
+    // so it is only worth showing if it stays close to a rendered measurement.
+    const steadyLevels = [];
+    for (const level of [-45, -30, -18, -6, 0]) {
+      steadyLevels.push(await page.eval(`__nnMeasureSteady(70, ${level})`));
+    }
+    const worstError = Math.max(...steadyLevels.map((s) => Math.abs(s.measuredDb - s.modelDb)));
+    check(
+      'the transfer model the popup plots matches the rendered chain',
+      worstError < 3.5,
+      steadyLevels
+        .map(
+          (s) =>
+            `${s.inputDb}: model ${s.modelDb.toFixed(1)} vs measured ${s.measuredDb.toFixed(1)}`,
+        )
+        .join(', ') + ` => worst ${worstError.toFixed(2)} dB`,
+    );
+
+    /* -------- live settings updates -------- */
+    await writeSettings({ strength: 0 });
     const bypassedVideo = await waitFor('bypassed video', async () => {
       const marked = await page.eval(`document.querySelectorAll('video[data-nn-tone="1"]').length`);
       return marked === 0;
@@ -952,23 +1170,210 @@ async function main() {
       `audio=${offStatus?.audio.state} video=${offStatus?.video.mode}`,
     );
 
-    await sw.eval(
-      `chrome.storage.sync.set({ settings: { enabled: false, strength: 60, audio: true, video: true } })`,
-    );
+    await writeSettings({ enabled: false, strength: 60 });
     const unmarked = await waitFor('video unmarked', async () => {
       const count = await page.eval(`document.querySelectorAll('video[data-nn-tone="1"]').length`);
       return count === 0 ? true : false;
     });
     check('master off removes the video filter entirely', unmarked === true);
 
-    await sw.eval(
-      `chrome.storage.sync.set({ settings: { enabled: true, strength: 70, audio: true, video: true } })`,
-    );
+    /* -------- the toolbar says so -------- */
+    // The keyboard shortcut has no other feedback: on a tab with no video,
+    // flipping the switch would otherwise be completely invisible.
+    const badgeOff = await waitFor('off badge', async () => {
+      const text = await sw.eval(`chrome.action.getBadgeText({})`);
+      return text === 'off' ? text : false;
+    });
+    check('the toolbar badge reports the off state', badgeOff === 'off', `badge "${badgeOff}"`);
+
+    await writeSettings({ enabled: true, strength: 70 });
     const remarked = await waitFor('video re-marked', async () => {
       const count = await page.eval(`document.querySelectorAll('video[data-nn-tone="1"]').length`);
       return count > 0;
     });
     check('re-enabling restores processing live', remarked === true);
+
+    const badgeOn = await waitFor('cleared badge', async () => {
+      const text = await sw.eval(`chrome.action.getBadgeText({})`);
+      return text === '' ? '(empty)' : false;
+    });
+    check('the badge clears again when switched back on', badgeOn === '(empty)');
+
+    /* -------- split audio/video strength -------- */
+    // One slider cannot express "compress the audio hard, leave the picture
+    // nearly alone", so the two can be separated.
+    await writeSettings({ linked: false, audioStrength: 70, videoStrength: 0 });
+    const videoOnlyBypassed = await waitFor('video bypassed while audio runs', async () => {
+      const marked = await page.eval(
+        `document.querySelectorAll('video[data-nn-tone="1"]').length`,
+      );
+      if (marked !== 0) return false;
+      const status = await readStatus();
+      return status?.audio.state === 'active' ? status : false;
+    });
+    check(
+      'video strength 0 bypasses the picture while audio keeps compressing',
+      Boolean(videoOnlyBypassed),
+      videoOnlyBypassed
+        ? `audio=${videoOnlyBypassed.audio.state}, marked videos=0`
+        : 'never reached that state',
+    );
+
+    await writeSettings({ linked: false, audioStrength: 0, videoStrength: 70 });
+    const audioOnlyBypassed = await awaitStatus(
+      (s) => s.audio.state === 'off' && s.video.mode !== 'off',
+    );
+    check(
+      'audio strength 0 bypasses the sound while the tone curve keeps working',
+      audioOnlyBypassed?.audio.state === 'off' && audioOnlyBypassed?.video.mode !== 'off',
+      `audio=${audioOnlyBypassed?.audio.state} video=${audioOnlyBypassed?.video.mode}`,
+    );
+
+    /* -------- per-site exclusion -------- */
+    const reportedSite = await waitFor('reported site', async () => {
+      const status = await readStatus();
+      return status?.site || false;
+    });
+    check(
+      'the frame reports a bare hostname so the popup can offer a per-site switch',
+      reportedSite === 'localhost',
+      `site "${reportedSite}"`,
+    );
+
+    await writeSettings({ strength: 70, disabledSites: ['localhost'] });
+    const excluded = await waitFor('site excluded', async () => {
+      const marked = await page.eval(
+        `document.querySelectorAll('video[data-nn-tone="1"]').length`,
+      );
+      if (marked !== 0) return false;
+      const status = await readStatus();
+      return status?.siteDisabled && status.audio.state === 'off' ? status : false;
+    });
+    check(
+      'an excluded site is left completely alone, audio and video',
+      Boolean(excluded),
+      excluded ? `siteDisabled=true, audio=${excluded.audio.state}, marked videos=0` : 'still processing',
+    );
+
+    // A per-tab badge marks the exclusion, since the master switch is still on.
+    const pageTabKey = await sw.eval(
+      `chrome.storage.session.get('frameStatus').then(r => Number(Object.keys(r.frameStatus ?? {})[0] ?? -1))`,
+    );
+    const siteBadge = await waitFor('per-site badge', async () => {
+      const text = await sw.eval(`chrome.action.getBadgeText({ tabId: ${pageTabKey} })`);
+      return text === 'site' ? text : false;
+    }).catch(() => '');
+    check(
+      'the toolbar badge distinguishes a per-site exclusion from a global off',
+      siteBadge === 'site',
+      `badge "${siteBadge}" on the excluded tab`,
+    );
+
+    await writeSettings({ strength: 70, disabledSites: ['other.example'] });
+    const restored = await waitFor('site processing restored', async () => {
+      const marked = await page.eval(
+        `document.querySelectorAll('video[data-nn-tone="1"]').length`,
+      );
+      return marked > 0;
+    });
+    check(
+      'excluding a different site does not affect this one',
+      restored === true,
+      'subdomain-safe matching keeps unrelated hosts untouched',
+    );
+
+    await writeSettings({ strength: 70 });
+
+    /* -------- the night window -------- */
+    // The shipped default only processes at night. On a machine with no ambient
+    // light sensor -- which is every stock Chrome, since AmbientLightSensor sits
+    // behind chrome://flags/#enable-generic-sensor-extra-classes -- the clock is
+    // what decides, so that is what these two checks pin down.
+    await writeSettings({
+      strength: 70,
+      nightOnly: true,
+      nightStart: shiftMinutes(120),
+      nightEnd: shiftMinutes(240),
+    });
+    const outsideWindow = await waitFor('night window closed', async () => {
+      const marked = await page.eval(
+        `document.querySelectorAll('video[data-nn-tone="1"]').length`,
+      );
+      if (marked !== 0) return false;
+      const status = await readStatus();
+      return status?.gate?.reason === 'daytime' && status.audio.state === 'off' ? status : false;
+    }).catch(() => null);
+    check(
+      'outside the night window nothing is processed',
+      Boolean(outsideWindow),
+      outsideWindow
+        ? `gate=${outsideWindow.gate.reason}/${outsideWindow.gate.source}, ` +
+            `audio=${outsideWindow.audio.state}, marked videos=0`
+        : 'still processing during the day',
+    );
+
+    // Without a badge, "correctly doing nothing until 21:00" and "broken" look
+    // identical from the toolbar.
+    const dayBadge = await waitFor('day badge', async () => {
+      const text = await sw.eval(`chrome.action.getBadgeText({ tabId: ${pageTabKey} })`);
+      return text === 'day' ? text : false;
+    }).catch(() => '');
+    check(
+      'the toolbar badge says it is waiting for night',
+      dayBadge === 'day',
+      `badge "${dayBadge}" while outside the window`,
+    );
+
+    check(
+      'the clock is in charge when no light sensor is available',
+      outsideWindow?.gate?.source === 'clock' && outsideWindow?.gate?.lux === null,
+      `source=${outsideWindow?.gate?.source ?? 'unknown'}, lux=${outsideWindow?.gate?.lux ?? 'none'}`,
+    );
+
+    await writeSettings({
+      strength: 70,
+      nightOnly: true,
+      nightStart: shiftMinutes(-60),
+      nightEnd: shiftMinutes(60),
+    });
+    const insideWindow = await waitFor('night window open', async () => {
+      const marked = await page.eval(
+        `document.querySelectorAll('video[data-nn-tone="1"]').length`,
+      );
+      return marked > 0 ? marked : false;
+    });
+    check(
+      'inside the night window processing resumes without a reload',
+      insideWindow > 0,
+      `${insideWindow} marked video(s) once the window opened`,
+    );
+
+    /* -------- leaving music alone -------- */
+    // The bench's only processable audio is an <audio> element, which is exactly
+    // what the heuristic treats as music: dynamic range is the point of a record.
+    await writeSettings({ strength: 70, skipMusic: true });
+    const musicSkipped = await awaitStatus(
+      (s) => s.audio.state === 'music' && s.music.skipped > 0,
+    );
+    check(
+      'music is left uncompressed while video keeps being tone mapped',
+      musicSkipped?.audio.state === 'music' &&
+        musicSkipped?.music.skipped > 0 &&
+        musicSkipped?.audio.processed === 0 &&
+        musicSkipped?.video.mode !== 'off',
+      `audio=${musicSkipped?.audio.state}, skipped as music=${musicSkipped?.music.skipped}, ` +
+        `processed=${musicSkipped?.audio.processed}, video=${musicSkipped?.video.mode}`,
+    );
+
+    await writeSettings({ strength: 70, skipMusic: false });
+    const musicProcessed = await awaitStatus((s) => s.audio.state === 'active');
+    check(
+      'turning the music exemption off compresses it again',
+      musicProcessed?.audio.state === 'active' && musicProcessed?.music.skipped === 0,
+      `audio=${musicProcessed?.audio.state}, processed=${musicProcessed?.audio.processed}`,
+    );
+
+    await writeSettings({ strength: 70 });
 
     /* -------- dynamic insertion -------- */
     const before = await page.eval(`document.querySelectorAll('video').length`);
@@ -1017,10 +1422,76 @@ async function main() {
           master: document.getElementById('master').checked,
           audio: document.getElementById('audio').checked,
           video: document.getElementById('video').checked,
+          nightEq: document.getElementById('night-eq').checked,
           audioStatus: document.getElementById('audio-status').textContent,
           videoStatus: document.getElementById('video-status').textContent,
+          shortcutShown: !document.getElementById('shortcut').hidden,
+          shortcutKeys: document.getElementById('shortcut-keys').textContent,
+          splitShown: !document.getElementById('split').hidden,
+          nightOnly: document.getElementById('night-only').checked,
+          nightStart: document.getElementById('night-start').value,
+          nightEnd: document.getElementById('night-end').value,
+          nightWindowShown: !document.getElementById('night-window').hidden,
+          skipMusic: document.getElementById('skip-music').checked,
        }))()`,
     );
+    // The hint must show the *real* accelerator and must stay hidden when there
+    // is none, rather than printing a shortcut that would do nothing.
+    check(
+      'popup surfaces the keyboard shortcut, and only when one is bound',
+      shortcutBound
+        ? popupState.shortcutShown === true &&
+            popupState.shortcutKeys === toggleCommand.shortcut
+        : popupState.shortcutShown === false,
+      shortcutBound
+        ? `shows "${popupState.shortcutKeys}"`
+        : 'no accelerator bound in this profile, so the hint stays hidden',
+    );
+    check(
+      'popup starts in linked mode with the split sliders hidden',
+      popupState.splitShown === false,
+    );
+
+    // The clock fields only mean anything while the night restriction is on, so
+    // they follow its switch rather than sitting there looking authoritative.
+    check(
+      'popup hides the clock fields while the night restriction is off',
+      popupState.nightOnly === false && popupState.nightWindowShown === false,
+      `nightOnly=${popupState.nightOnly}, window shown=${popupState.nightWindowShown}`,
+    );
+
+    await popup.eval(`document.getElementById('night-only').click(); true`);
+    await sleep(400);
+    const nightUi = await popup.eval(
+      `(() => ({
+          windowShown: !document.getElementById('night-window').hidden,
+          start: document.getElementById('night-start').value,
+          end: document.getElementById('night-end').value,
+          desc: document.getElementById('night-desc').textContent,
+       }))()`,
+    );
+    const nightStored = JSON.parse(
+      (await sw.eval(
+        `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+      )) ?? '{}',
+    );
+    check(
+      'popup reveals the clock fields and persists the night restriction',
+      nightUi.windowShown === true &&
+        /^\d{2}:\d{2}$/.test(nightUi.start) &&
+        /^\d{2}:\d{2}$/.test(nightUi.end) &&
+        nightStored.nightOnly === true,
+      `${nightUi.start}-${nightUi.end}, stored nightOnly=${nightStored.nightOnly}`,
+    );
+    // With no sensor the copy has to say so rather than implying one is in use.
+    check(
+      'popup says which signal is deciding',
+      typeof nightUi.desc === 'string' && /sensor|clock|dark room/i.test(nightUi.desc),
+      `"${nightUi.desc}"`,
+    );
+
+    await popup.eval(`document.getElementById('night-only').click(); true`);
+    await sleep(400);
     check(
       'popup renders and reflects stored settings',
       popupState.strength === '70' && popupState.master === true,
@@ -1064,8 +1535,95 @@ async function main() {
         `${curveAt70.centroid.toFixed(1)} vs ${curveAt0.centroid.toFixed(1)}`,
     );
 
-    // That slider move was a real settings write, so put it back and let the
-    // engines re-engage before the status query below.
+    // The audio graph is generated from the same mapping the engine uses, so it
+    // has to draw and to respond to the slider as well.
+    const audioSignature = curveSignature.replace("'curve'", "'audio-curve'");
+    const audioAt0 = JSON.parse(await popup.eval(audioSignature));
+    await popup.eval(
+      `(() => {
+         const slider = document.getElementById('strength');
+         slider.value = '85';
+         slider.dispatchEvent(new Event('input'));
+         return true;
+       })()`,
+    );
+    const audioAt85 = JSON.parse(await popup.eval(audioSignature));
+    check(
+      'popup draws the audio transfer curve and it tracks the slider',
+      audioAt0.lit > 200 && audioAt85.lit > 200 && audioAt0.centroid !== audioAt85.centroid,
+      `lit px ${audioAt0.lit} @0 vs ${audioAt85.lit} @85, centroid ` +
+        `${audioAt0.centroid.toFixed(1)} vs ${audioAt85.centroid.toFixed(1)}`,
+    );
+
+    // Splitting the sliders is a popup-driven settings change; check the UI
+    // swaps over and the write lands.
+    await popup.eval(`document.getElementById('link-toggle').click(); true`);
+    await sleep(400);
+    const splitUi = await popup.eval(
+      `(() => ({
+          splitShown: !document.getElementById('split').hidden,
+          masterShown: !document.getElementById('strength').hidden,
+          pressed: document.getElementById('link-toggle').getAttribute('aria-pressed'),
+       }))()`,
+    );
+    const splitStored = await sw.eval(
+      `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+    );
+    check(
+      'popup can separate the two sliders and persists the choice',
+      splitUi.splitShown === true &&
+        splitUi.masterShown === false &&
+        splitUi.pressed === 'true' &&
+        JSON.parse(splitStored).linked === false,
+      JSON.stringify(splitUi),
+    );
+    await popup.eval(`document.getElementById('link-toggle').click(); true`);
+    await sleep(400);
+
+    // The per-site button is the whole point of reporting the hostname. In this
+    // harness the popup is itself a tab, so the "active tab" it inspects is the
+    // popup unless the page is brought back to the foreground first.
+    await browser.send('Target.activateTarget', { targetId: tab.id }).catch(() => {});
+    await waitFor('popup picks up the page tab', async () => {
+      const site = await popup.eval(
+        `document.getElementById('site-toggle').hidden ? '' : document.getElementById('site-toggle-text').textContent`,
+      );
+      return site && site.includes('localhost') ? site : false;
+    });
+    const siteUi = await popup.eval(
+      `(() => {
+         const button = document.getElementById('site-toggle');
+         return {
+           hidden: button.hidden,
+           text: document.getElementById('site-toggle-text').textContent,
+           pressed: button.getAttribute('aria-pressed'),
+         };
+       })()`,
+    );
+    check(
+      'popup offers a per-site switch naming the actual host',
+      siteUi.hidden === false && (siteUi.text ?? '').includes('localhost'),
+      `"${siteUi.text}" (pressed=${siteUi.pressed})`,
+    );
+
+    await popup.eval(`document.getElementById('site-toggle').click(); true`);
+    const siteExcluded = await waitFor('site excluded from the popup', async () => {
+      const stored = JSON.parse(
+        (await sw.eval(
+          `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+        )) ?? '{}',
+      );
+      return stored.disabledSites?.includes('localhost') ? stored : false;
+    });
+    check(
+      'the per-site switch writes the exclusion',
+      Boolean(siteExcluded),
+      JSON.stringify(siteExcluded?.disabledSites ?? []),
+    );
+    // Put it back, then let the engines re-engage before the status query below.
+    await popup.eval(`document.getElementById('site-toggle').click(); true`);
+    await sleep(600);
+
     await popup.eval(
       `(() => {
          const slider = document.getElementById('strength');

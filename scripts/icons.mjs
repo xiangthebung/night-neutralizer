@@ -7,22 +7,7 @@
  * auditable, which matters for an extension that asks users to trust it.
  */
 import { deflateSync } from 'node:zlib';
-
-const CRC_TABLE = (() => {
-  const table = new Int32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[n] = c;
-  }
-  return table;
-})();
-
-function crc32(buf) {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
+import { crc32 } from './crc32.mjs';
 
 function chunk(type, data) {
   const length = Buffer.alloc(4);
@@ -71,7 +56,7 @@ const smoothstep = (edge0, edge1, x) => {
  * Icon art: a soft rounded square in near-black navy with a warm crescent moon
  * and a compressed waveform underneath. 4x4 supersampled for clean edges.
  */
-function sampleIcon(u, v) {
+function sampleIcon(u, v, dim) {
   // Rounded-square mask in normalised [0,1] space.
   const r = 0.24;
   const dx = Math.max(Math.abs(u - 0.5) - (0.5 - r), 0);
@@ -121,10 +106,25 @@ function sampleIcon(u, v) {
     }
   }
 
+  if (dim) {
+    // The "off" variant of the toolbar icon: desaturated and darkened so the
+    // extension's state is visible at a glance without opening the popup. The
+    // silhouette is untouched, so it still reads as the same icon rather than
+    // looking like a different extension.
+    const luma = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+    const grey = (channel) => (channel * 0.25 + luma * 0.75) * 0.5;
+    return [clamp01(grey(cr)), clamp01(grey(cg)), clamp01(grey(cb)), inside * 0.85];
+  }
+
   return [clamp01(cr), clamp01(cg), clamp01(cb), inside];
 }
 
-export function renderIcon(size) {
+/**
+ * @param {number} size
+ * @param {{ dim?: boolean }} [options] `dim` renders the disabled-state icon.
+ */
+export function renderIcon(size, options = {}) {
+  const dim = options.dim === true;
   const rgba = Buffer.alloc(size * size * 4);
   const samples = 4;
   for (let y = 0; y < size; y++) {
@@ -137,7 +137,7 @@ export function renderIcon(size) {
         for (let sx = 0; sx < samples; sx++) {
           const u = (x + (sx + 0.5) / samples) / size;
           const v = (y + (sy + 0.5) / samples) / size;
-          const [pr, pg, pb, pa] = sampleIcon(u, v);
+          const [pr, pg, pb, pa] = sampleIcon(u, v, dim);
           r += pr * pa;
           g += pg * pa;
           b += pb * pa;

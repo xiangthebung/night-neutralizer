@@ -6,7 +6,7 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=18"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "scripts": {
     "clean": "node scripts/build.mjs --clean-only",
@@ -18,7 +18,7 @@
     "test:watch": "vitest",
     "testpage": "node scripts/serve-test-page.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "zip": "node scripts/build.mjs && cd dist && zip -qr ../night-neutralizer.zip . && cd .. && echo \"wrote night-neutralizer.zip\"",
+    "zip": "node scripts/build.mjs --zip",
     "verify": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {

@@ -5,9 +5,18 @@ A Chrome extension for watching and listening in a dark room. It reduces the
 volume low without losing dark scenes or quiet dialogue — and without being
 ambushed by a bright cut or an explosion.
 
-- **Audio:** Web Audio compressor + make-up gain + limiter per media element.
+- **Audio:** Web Audio compressor + make-up gain + limiter per media element,
+  with an optional night EQ that takes the bass down and dialogue up.
 - **Video:** adaptive tone mapping (shadow lift, highlight roll-off, flash
   guard) driven by real per-frame luminance measurements.
+- **Only when it is actually night.** If the browser exposes an ambient light
+  sensor, the room decides; otherwise a configurable window on the clock does.
+  Default 21:00–07:00.
+- **Music is left alone.** Dynamic range is the point of a record and a nuisance
+  in a film, so YouTube Music, Spotify and anything else playing audio-only keep
+  their dynamics.
+- **Per-site and per-channel:** one slider by default, two when you want the
+  audio squashed and the picture left alone, and a one-click "skip this site".
 - **Local only:** one permission (`storage`), no network access, no accounts,
   no telemetry, no remote code.
 
@@ -18,6 +27,8 @@ ambushed by a bright cut or an explosion.
 - [Install and build](#install-and-build)
 - [Using it](#using-it)
 - [Architecture](#architecture)
+- [When it runs](#when-it-runs)
+- [Leaving music alone](#leaving-music-alone)
 - [Audio processing](#audio-processing)
 - [Video processing](#video-processing)
   - [Why not canvas or WebGL?](#why-not-canvas-or-webgl)
@@ -60,11 +71,19 @@ Other commands:
 | `npm run verify` | typecheck + unit tests + production build |
 | `npm run smoke` | end-to-end checks in real headless Chrome |
 | `npm run testpage` | serves the manual test bench on `http://localhost:8791` |
-| `npm run zip` | build and package `night-neutralizer.zip` |
+| `npm run zip` | build, package `artifacts/night-neutralizer-<version>.zip`, and verify the archive |
+| `npm run clean` | remove `dist/` and `artifacts/` |
 
 There are no runtime dependencies. The build is esbuild only, and the icons are
 generated at build time by `scripts/icons.mjs`, so the repository contains no
-binary assets.
+binary assets. Packaging is pure Node too (`scripts/zip.mjs`) rather than a call
+out to a `zip` binary, so it behaves the same on Windows, macOS and Linux; the
+archive is written with fixed timestamps, then read back and CRC-checked entry by
+entry, so a malformed package fails the build instead of the store upload.
+
+The headless dev tools (`npm run smoke`, `scripts/popup-shot.mjs`) find Chrome
+themselves on all three platforms. `CHROME_PATH` overrides the search if you want
+a specific build.
 
 ---
 
@@ -77,12 +96,45 @@ Click the toolbar icon:
   dynamic-range compression: quiet gets louder, loud gets quieter, shadows get
   lifted further and highlights roll off earlier. Lower strength keeps more of
   the original contrast and punch. **0 is a complete bypass.** Default is 45.
-  The thumbnail beside the slider is the actual tone curve for the chosen
-  strength, drawn with the same `buildToneCurve()` the content script uses,
-  against a dotted "no change" diagonal. The shaded band is the range the curve
-  moves within as scenes get darker or brighter, so its width shows how much
-  adaptation headroom the setting has.
+- **Set audio and video separately** — splits the slider in two. One number
+  cannot express "compress the soundtrack hard but barely touch the picture",
+  which is an ordinary thing to want. Re-linking takes the midpoint of the two.
+- **The caption under each graph says what the setting does**, in numbers: at the
+  default, "dark scenes 2.9× brighter / whites 14% softer" and "quiet parts
+  +9 dB / loud-to-quiet gap −9 dB". Those come from `core/readings.ts`, which
+  derives them from the same curve and transfer functions the engines use, so a
+  caption cannot describe an effect the extension is not applying. Figures are
+  rounded *down*, because the transfer model reads slightly optimistic against a
+  rendered measurement.
+- **The two graphs** are the actual effect at the chosen setting, not decoration,
+  and they are the detail behind those captions rather than the only explanation
+  of them. The left one is the video tone curve, drawn with the same
+  `buildToneCurve()` the content script uses; its shaded band is the range the
+  curve moves within as scenes get darker or brighter, so the band's width shows
+  how much adaptation headroom the setting has. The right one is the audio
+  transfer curve: settled input level against output level in dB, from the same
+  `mapAudioStrength()` the engine uses. In both, the dotted diagonal is
+  "unchanged", so the shaded area is exactly how much is being done to the signal.
+  Hovering either one describes its axes.
+- **Only at night** — on by default, and the reason the extension can be left
+  installed and forgotten. See [When it runs](#when-it-runs). The line under the
+  switch says which signal is in charge: a light-sensor reading in lux if the
+  browser gives one, otherwise "no light sensor here, so the clock decides". The
+  two clock fields below it set the window and only appear while the switch is on.
 - **Audio** / **Video** — process each independently.
+- **Leave music alone** — on by default. See
+  [Leaving music alone](#leaving-music-alone).
+- **Night EQ** — off by default. Compression fixes "I can't hear the dialogue",
+  but the reason you reach for the volume knob at night is low frequency: bass
+  travels through walls and floors where midrange does not. This shelves the low
+  end down (up to −7 dB below 120 Hz) and lifts a wide bell at 2.6 kHz (up to
+  +3.5 dB) to buy back the consonants that go down with it.
+- **Skip *hostname*** — in the status card, leaves that site completely alone,
+  audio and video. Useful for a site that already tone-maps its own video, a work
+  tool you never watch at night, or anything that misbehaves. Listing a domain
+  also covers its subdomains, and it matches both the page you are on and the
+  origin of an embedded player, so skipping `youtube.com` also silences YouTube
+  embeds elsewhere.
 - **Right now on this tab** — shows what is actually happening: how many players
   are being compressed, and whether video is running *adaptive tone mapping*
   (frames are being measured) or a *fixed night curve* (frames cannot be read,
@@ -93,7 +145,15 @@ Changes apply immediately to open tabs; no reload. Settings live in
 
 **Keyboard shortcut:** `Alt+Shift+N` toggles the extension on and off without
 opening the popup — handy when a scene is already too bright and you just want it
-gone. Remap it at `chrome://extensions/shortcuts`.
+gone. Remap it at `chrome://extensions/shortcuts`; the popup shows whatever it is
+currently bound to, and shows nothing if you have unbound it.
+
+**The toolbar icon reports state**, because the shortcut has no other feedback:
+on a tab with no video, or with video processing already off, pressing it would
+otherwise be completely invisible. Switched off, the icon dims and the badge reads
+`off`; on a site you have skipped, that tab's badge reads `site`; and while it is
+standing down until night, that tab's badge reads `day` — without which "correctly
+doing nothing until 21:00" and "broken" look identical from the toolbar.
 
 All controls are native form elements: tab to them, toggle with `Space`, move
 the slider with arrow keys / `Home` / `End`. The slider announces both the value
@@ -108,8 +168,15 @@ an `aria-live` region.
 popup (popup.ts)                    service worker (service-worker.ts)
   │  writes settings                   │  seeds defaults on install
   │                                    │  relays + aggregates status
+  │                                    │  paints the toolbar badge/icon
   ▼                                    ▲
 chrome.storage.sync  ──onChanged──►  content script (one per frame)
+                                       │
+chrome.storage.session ──onChanged──►  │   ambient light reading (shared)
+the local clock ───────────────────►   │
+                                       ▼
+                                  core/gate.ts
+                        "should this frame do anything, and why not"
                                        │
                         ┌──────────────┼───────────────┐
                         ▼              ▼               ▼
@@ -126,14 +193,24 @@ Design notes:
 
 - **Settings flow through storage, not messages.** The popup only writes a key;
   every content script reacts to `chrome.storage.onChanged`. That is why applying
-  a change needs no tab permissions and no page reload.
+  a change needs no tab permissions and no page reload. The ambient light reading
+  travels the same way, through `chrome.storage.session`.
+- **One gate, one reason.** `core/gate.ts` is the only place that decides whether
+  a frame processes anything, and it returns *why* along with the answer. The
+  engines, the popup's status lines and the toolbar badge all display what it
+  returned rather than each deriving it again. Before it existed the decision was
+  an inline `enabled && !siteDisabled`; adding "and it has to be dark" and "and
+  the clock has to agree" to that would have meant three copies of the same
+  reasoning drifting apart.
 - **Pure core, impure edges.** All parameter maths (`core/strength.ts`,
   `core/tone-curve.ts`), settings validation and status aggregation are pure
   modules with no DOM or Chrome dependency, which is what makes them unit
   testable. Everything that touches the DOM or Web Audio lives in `content/`.
-- **The service worker holds no page data.** It stores only per-frame status
-  summaries (counts and states, no URLs) in `chrome.storage.session`, which never
-  hits disk, and drops them when a tab closes.
+- **The service worker holds no page data beyond a hostname.** It stores per-frame
+  status summaries — counts, engine states, and the bare hostname the per-site
+  switch needs — in `chrome.storage.session`, which never hits disk, and drops
+  them when a tab closes. No paths, no queries, no titles. See
+  [Privacy](#privacy).
 - **One instance per frame.** The content script guards against double
   initialisation and cleans up on `pagehide`.
 
@@ -157,22 +234,111 @@ Design notes:
 
 ---
 
+## When it runs
+
+With **Only at night** on (the default), the order of precedence is:
+
+1. the master switch;
+2. the per-site exclusion list;
+3. an **ambient light sensor** reading, if one is available;
+4. otherwise the **clock**, against the configured window.
+
+The sensor outranks the clock because it is a better answer to the actual
+question. A room with the blinds down at 4 p.m. is exactly when this extension
+helps, and a brightly lit room at 11 p.m. is exactly when it does not.
+
+**The honest position on the sensor: you will probably never see it.**
+`AmbientLightSensor` is implemented in Chromium but is not exposed to pages unless
+`chrome://flags/#enable-generic-sensor-extra-classes` is switched on and the
+browser relaunched, and even then the machine needs a light sensor — common on
+laptops and phones, rare on desktops. So on a stock install the clock is what
+runs, and the popup says so rather than implying a sensor is in use. If you do
+enable the flag, it is picked up with no further configuration.
+
+Details that matter in practice:
+
+- **Thresholds with a gap.** At or below 30 lux counts as dark, at or above 60 as
+  lit, and in between the previous verdict stands. Without that gap a reading
+  hovering at the boundary would switch the whole extension on and off once a
+  second. For scale: an office is 300–500 lux, a living room with lamps on is
+  50–150, and a room lit only by the screen is single digits.
+- **One reading, shared.** Only a top-level frame can read a sensor (the
+  `ambient-light-sensor` permission policy defaults to `self`), so the frame that
+  can publishes to `chrome.storage.session` and every other frame in every tab
+  picks it up through `onChanged`. Otherwise a cross-origin embedded player would
+  fall back to the clock and disagree with the page hosting it. Publishing is
+  throttled to verdict changes plus real movement, so a steady room costs nothing.
+- **The clock window may wrap midnight**, which is the normal case. `21:00` to
+  `07:00` means what you expect; the start is inclusive and the end exclusive.
+  Setting both fields to the same time reads as *always*, and the popup says so —
+  "never" would switch the extension off with nothing on screen to explain it.
+- **Boundaries are a timer, not a poll.** Each frame sleeps until the window next
+  opens or closes, capped at ten minutes so a DST change or a corrected system
+  clock cannot go unnoticed for an hour, and re-checks when a hidden tab becomes
+  visible again.
+- **Times are local wall-clock time**, stored as minutes since midnight. The popup
+  renders them in your locale's convention, so the caption and the clock fields
+  agree.
+
+---
+
+## Leaving music alone
+
+Compression is a fix for a specific problem: dialogue mixed 30 dB below the
+explosions. On a record the range *is* the performance, so with **Leave music
+alone** on (the default) the audio half stands down for music. Two signals are
+combined:
+
+1. **The host.** A frame served by a music service is playing music, whether it is
+   the page you are looking at or a player embedded in someone's blog. That is any
+   `music.*` subdomain — `music.youtube.com`, `music.apple.com`,
+   `music.amazon.co.uk`, `music.yandex.ru`, so one rule covers the regional
+   variants too — plus an explicit list in `core/music.ts` (Spotify, SoundCloud,
+   Bandcamp, Deezer, Tidal, Mixcloud, Pandora, Qobuz and similar). Note that
+   `music.youtube.com` is listed and `youtube.com` is not: matching one does not
+   match the other.
+2. **The element.** Audio-only playback is not a film. An `<audio>` element, or a
+   `<video>` whose stream carries no picture once metadata has loaded, counts as
+   music. This catches services that are not on the list, and short interface
+   sounds, which are no loss.
+
+Both signals err in the same direction — towards leaving audio exactly as the site
+sent it, which is the pre-extension status quo. The obvious false positive is a
+**podcast or audiobook in an `<audio>` element**, which would benefit from
+compression and will not get it; turn the toggle off if that is most of what you
+listen to.
+
+**Video is unaffected.** Tone mapping a music video at 1 a.m. is still worth
+doing, and it has nothing to do with what you are listening to. So on
+`music.youtube.com` the picture is still processed and only the sound is left
+alone. The popup's status line says which.
+
+---
+
 ## Audio processing
 
 Per element, created lazily on first playback:
 
 ```
-MediaElementSource → preGain → DynamicsCompressor → makeupGain
-                   → limiter → safety soft clipper → destination
+MediaElementSource → preGain → lowShelf → presence → DynamicsCompressor
+                   → makeupGain → limiter → safety soft clipper → destination
 ```
 
 | stage | role |
 | --- | --- |
 | `preGain` | pushes quiet material into the compressor knee |
+| `lowShelf` / `presence` | night EQ; flat unless it is switched on |
 | compressor | the actual range reduction, soft knee, release grows with strength |
-| `makeupGain` | computed so a 0 dBFS peak lands near −4 dBFS |
-| limiter | ratio 20, 2 ms attack, −2 dB threshold: catches transients only |
+| `makeupGain` | computed so a 0 dBFS peak lands at or below −4 dBFS |
+| limiter | ratio 20, 2 ms attack, threshold tightening from −0.5 dB to −2 dB with strength: catches transients only |
 | safety clipper | instantaneous `WaveShaper`, bounded at 0.99, so nothing can reach the sink above full scale |
+
+The EQ sits *before* the compressor so the compressor sees and controls the
+boosted presence band rather than being surprised by it, and the presence gain is
+subtracted from the make-up gain so the headroom guarantee below still holds with
+the EQ engaged. Both filters stay in the graph permanently and go flat when the
+toggle is off: rebuilding a live Web Audio graph is what risks silencing an
+element, so no code path does it.
 
 Mapping (from `core/strength.ts`, verified by unit tests):
 
@@ -199,6 +365,17 @@ And this is what the chain actually measures, rendered offline through
 | usable range | 45.0 dB | 38.0 dB | 21.9 dB |
 | worst peak, incl. a full-scale burst | −3.01 | −0.18 | −0.28 |
 | added latency | 0 | 12.00 ms | 12.00 ms |
+
+And the night EQ, measured the same way (single tones through the two filters,
+strength 70):
+
+| frequency | 60 Hz | 700 Hz | 2600 Hz |
+| --- | --- | --- | --- |
+| change with night EQ on | −5.15 dB | +0.25 dB | +2.74 dB |
+
+Low end down, mid-range essentially untouched, consonants up. At strength 0 both
+filters measure flat to within 0.001 dB, so bypass stays bypass whatever else is
+switched on.
 
 Choices worth explaining:
 
@@ -439,8 +616,36 @@ Consequences:
   ramp and is handled by the slower scene adaptation instead.
 - **Saturation compensation is global** (`saturate()`), not perceptual. At
   maximum strength, extremely saturated highlights can shift slightly.
+- **Players that paint into a `<canvas>` get nothing.** The CSS rule targets
+  `video[data-nn-tone="1"]`, so a site that decodes into a canvas or a WebGL
+  surface instead of presenting a `<video>` is invisible to the video half. The
+  audio half still works.
+- **One curve serves every video in a document.** Adaptation is driven by the
+  primary video (the largest visible playing one) and the resulting LUT is shared
+  by all marked videos in that frame. On a page with a main player *and* a second
+  smaller clip playing at once, the second one is tone-mapped with the first one's
+  curve. Separate filters per element would mean a filter definition and a
+  measurement loop per element, which is a real cost for a rare case.
+- **The ambient light sensor is usually not available.** Chrome hides
+  `AmbientLightSensor` behind `chrome://flags/#enable-generic-sensor-extra-classes`
+  and most desktops have no sensor anyway, so in practice the clock decides. This
+  is stated in the popup rather than left to be discovered. A cross-origin iframe
+  can never read one (permission policy), which is why the reading is shared from
+  the top frame.
+- **The night window is local wall-clock time.** A DST change or a corrected
+  system clock shifts it, and the re-check is capped at ten minutes, so the
+  boundary can land up to ten minutes late in that situation.
+- **Music detection is a heuristic.** A podcast or audiobook played through an
+  `<audio>` element is treated as music and left uncompressed, and a music service
+  not on the list that streams a real video track is compressed like a film. There
+  is no reliable metadata for this; the toggle exists because of that.
+- **Per-site skipping is by hostname, not by URL.** There is no "skip this one
+  video" or "skip this path", and the extension deliberately never sees the path.
 - **Chrome-owned pages** (`chrome://`, the Web Store, other extensions) cannot be
   modified by any extension.
+- **Chrome only.** It runs on Chromium-based browsers (Chrome, Edge). Firefox
+  would need its own manifest key and `browser`-namespace handling; that has not
+  been done.
 
 ---
 
@@ -451,10 +656,29 @@ Consequences:
 - **No page content leaves the frame.** Frame pixels are read into a 48×27
   buffer, reduced to four numbers, and thrown away. They are never stored,
   transmitted, or exposed to the page.
-- **What is stored:** your four settings in `chrome.storage.sync`, and short-lived
-  per-frame status summaries (counts, states, note strings — no URLs, no titles)
-  in `chrome.storage.session`, which is memory-only and cleared when Chrome
-  closes. Tab entries are deleted when the tab closes.
+- **What is stored on disk:** your settings, in `chrome.storage.sync` — the master
+  switch, the strength values, the audio/video/night-EQ/music toggles, the night
+  window, and the list of hostnames you have chosen to skip. Nothing else.
+- **What is held in memory:** short-lived per-frame status summaries and the latest
+  ambient light reading, in `chrome.storage.session`, which is memory-only, dropped
+  when the tab closes and cleared when Chrome exits. Each summary carries counts,
+  engine states, note strings, and **the bare hostname of the page** — no path, no
+  query string, no title, no history.
+- **The light reading is a single number** (illuminance in lux) with a timestamp.
+  It never reaches disk and is not combined with anything else. Nothing reads the
+  sensor unless **Only at night** is on.
+- **Content scripts can read that session area.** The service worker widens the
+  access level (`setAccessLevel`) so one frame's light reading can be shared with
+  every other frame without a broadcast loop over your tabs. Content scripts run
+  in an isolated world, so page JavaScript cannot reach any of it, and the widest
+  thing exposed is the set of hostnames the extension already knows about.
+- **Why the hostname is there at all:** the popup cannot read the active tab's URL,
+  because the extension holds no `tabs` or host permission and is not going to ask
+  for one just to label a button. So each frame works out its own hostname and
+  reports it alongside its status, which is what lets the popup offer "skip
+  *hostname*". It is the minimum needed for that feature and it never reaches
+  disk. If you would rather it did not exist, the feature is the only thing that
+  uses it: `site` in `core/types.ts`.
 - **Production builds log nothing** to the page console.
 
 ## Permissions, and how to narrow them
@@ -483,12 +707,21 @@ Chrome will then only inject the content script on those sites.
 
 ## Testing
 
-Unit tests (`npm test`, 119 tests) cover the strength → parameter mapping,
-tone-curve maths and adaptation behaviour (including sampling-rate-independent
-flash detection), the safety clipper, media discovery and duplicate prevention,
-settings persistence, origin classification, and status aggregation.
+Unit tests (`npm test`, 298 tests) cover the strength → parameter mapping
+(including the night EQ and the transfer model the popup plots), tone-curve maths
+and adaptation behaviour (including sampling-rate-independent flash detection),
+the safety clipper, media discovery and duplicate prevention, settings
+persistence and migration, hostname normalisation and per-site matching, origin
+classification, the night window's midnight wrap and boundary arithmetic, the lux
+classifier's hysteresis and publishing throttle, the music host and element
+heuristics, the gate's order of precedence, status aggregation, the popup's
+plain-language captions
+(that they agree with the real curves, never overstate the effect, and stay short
+enough not to wrap), the SVG filter's DOM handling under jsdom (including the
+`<base href>` workaround and fullscreen re-parenting), and the status reporter's
+throttling.
 
-The end-to-end suite (`npm run smoke`, 42 checks) drives real headless Chrome
+The end-to-end suite (`npm run smoke`, 69 checks) drives real headless Chrome
 over the DevTools protocol: it installs the built extension, plays generated
 media, and asserts that the filter is applied, that the curve *changes across a
 scene change*, that **screenshotted pixels** show lifted shadows and compressed
@@ -497,11 +730,32 @@ then released, that the analysis cost stays small, that the audio graph engages,
 that settings apply live, that nested frames are covered, and that no console
 errors are produced.
 
+It also checks the newer behaviour end to end: that the night EQ moves the bands
+it claims to and stays flat at strength 0, that separating the sliders really does
+bypass one half while the other keeps working, that a skipped site is left
+completely alone, that the toolbar badge distinguishes "off" from "skipped", and
+that the popup's per-site button names the real host and writes the exclusion.
+
+The night and music gates are checked the same way, against a window shifted
+relative to the machine's actual clock: outside it nothing is marked or
+compressed, the badge reads `day`, the reported source is `clock` with no lux
+value (which is also the documented behaviour of a browser with no sensor), and
+moving the window over the current time resumes processing with no reload. With
+the music exemption on, the bench's `<audio>` element is reported as left alone
+while the video keeps being tone mapped; turning it off compresses it again.
+
 It also **renders the audio chain offline** and measures the result: bypass
 transparency to 0.01 dB, the quiet-vs-loud differential at each strength, that
-peaks never reach full scale even on an abrupt full-scale burst, and the exact
-latency. Two shipped bugs were found this way — see the audio section. No audio
-device is involved, so nothing is ever audible.
+peaks never reach full scale even on an abrupt full-scale burst (with or without
+the night EQ), and the exact latency. Two shipped bugs were found this way — see
+the audio section. No audio device is involved, so nothing is ever audible.
+
+One more measurement exists purely to keep the UI honest: the popup's audio graph
+is drawn from `audioTransferDb()`, an analytical model of the chain, so the smoke
+test renders the real chain at five input levels and compares. Worst disagreement
+is **1.7 dB**, in the conservative direction. If the model and the chain ever
+drift apart, the picture in the popup stops describing what you are hearing, and
+that check fails.
 
 Manual test procedures for YouTube, Vimeo, a local HTML5 page and a DRM site,
 plus performance and failure-mode checks, are in **[TESTING.md](TESTING.md)**.
@@ -520,6 +774,12 @@ src/
     soft-clip.ts           final safety clipper curve
     tone-curve.ts          scene stats, adaptation loop, curve builder
     settings.ts            validation + storage-backed store
+    site.ts                hostname normalisation + per-site exclusions
+    gate.ts                the single "should this frame do anything" decision
+    schedule.ts            night-window clock arithmetic
+    ambient.ts             lux -> dark/bright, plus the shared reading store
+    music.ts               music host + audio-only element heuristics
+    readings.ts            plain-language descriptions of the current effect
     media-origin.ts        Web Audio cross-origin safety classification
     status.ts              per-frame -> per-tab aggregation
     messages.ts            message contract
@@ -527,24 +787,29 @@ src/
   content/
     index.ts               per-frame bootstrap and wiring
     media-registry.ts      discovery, dedupe, lifecycle
+    light-sensor.ts        AmbientLightSensor wrapper (absence is normal)
     audio-engine.ts        Web Audio chain, probes, rollback
     video-engine.ts        frame measurement + adaptation loop
     tone-filter.ts         SVG filter + CSS rule management
     status-reporter.ts     throttled status push
   background/
-    service-worker.ts      defaults + status relay
+    service-worker.ts      defaults + status relay + toolbar badge
   popup/
     popup.html/.css/.ts    the UI
 tests/                     Vitest suites
 test-page/                 local manual test bench (generated media)
 scripts/
   build.mjs                esbuild pipeline
-  icons.mjs                PNG generation
+  icons.mjs                PNG generation (normal + dimmed "off" variants)
+  zip.mjs                  deterministic ZIP writer + verifier
+  crc32.mjs                shared checksum for PNG and ZIP
+  find-chrome.mjs          cross-platform Chrome discovery for the dev tools
   serve-test-page.mjs      static server for the bench
   smoke.mjs                real-Chrome end-to-end checks
-  popup-shot.mjs           dev utility: screenshot the popup at a given strength
+  popup-shot.mjs           dev utility: screenshot the popup and check its height
 ```
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE). Release history is in
+[CHANGELOG.md](CHANGELOG.md).
