@@ -49,21 +49,29 @@ Requirements: Node 18+ and Chrome 111+.
 
 ```bash
 npm install
-npm run build          # -> dist/
+npm run build          # -> dist/ and the repository root
 ```
 
-Then load it:
+`npm run build` also copies the production build into the repository root. This
+keeps the GitHub source download directly loadable for users who do not have
+Node.js.
+
+To load a GitHub download:
 
 1. open `chrome://extensions`
 2. turn on **Developer mode** (top right)
 3. click **Load unpacked**
-4. select the `dist/` folder
+4. extract the GitHub ZIP and select the extracted repository folder — the one
+   containing `manifest.json`
+
+For local development, `dist/` remains the production build output. The
+repository root is a synced copy intended for direct loading from GitHub.
 
 Other commands:
 
 | command | what it does |
 | --- | --- |
-| `npm run build` | production build into `dist/` (minified) |
+| `npm run build` | production build into `dist/` and the repository root (minified) |
 | `npm run build:dev` | unminified build with inline sourcemaps and debug logging |
 | `npm run watch` | rebuild TS on change (re-run for `manifest.json`/`popup.html` edits) |
 | `npm run typecheck` | `tsc --noEmit` |

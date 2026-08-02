@@ -129,7 +129,10 @@ async function main() {
   await esbuild.build(buildOptions);
   console.log(`\nbuild complete -> ${path.relative(root, out)}/  (${dev ? 'development' : 'production'})`);
   if (zip) await writeZip();
-  console.log('Load it via chrome://extensions -> Developer mode -> Load unpacked -> select dist/');
+  console.log(
+    'Load it via chrome://extensions -> Developer mode -> Load unpacked -> select dist/ ' +
+      '(or the repository root after npm run build)',
+  );
 }
 
 main().catch((err) => {
