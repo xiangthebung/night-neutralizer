@@ -2,7 +2,14 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Deliberately no `<meta name="viewport">`. Chrome sizes a browser-action
+      popup from the renderer's preferred width, clamped to 800 px, and
+      `width=device-width` sets the layout viewport to the *monitor* width — so
+      the preferred width saturated the cap and the popup rendered ~800 px wide
+      with the 330 px column stranded on the left. A popup has no viewport to
+      adapt to; its width is the width below.
+    -->
     <title>Night Neutralizer</title>
     <link rel="stylesheet" href="popup.css" />
   </head>

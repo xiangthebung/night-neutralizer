@@ -101,14 +101,17 @@ Click the toolbar icon:
 
 - **On/off** — master switch. Off means nothing is processed anywhere.
 - **Neutralization strength (0–100)** — higher strength means stronger
-  dynamic-range compression: quiet gets louder, loud gets quieter, shadows get
-  lifted further and highlights roll off earlier. Lower strength keeps more of
+  correction *where a scene needs it*: quiet gets louder, loud gets quieter,
+  dark scenes get opened up further and bright scenes get pulled down harder. A
+  scene already inside the light budget passes through untouched at any
+  strength; one over it is dimmed, but by a clean scale rather than by having
+  its blacks greyed and its highlights flattened. Lower strength keeps more of
   the original contrast and punch. **0 is a complete bypass.** Default is 45.
 - **Set audio and video separately** — splits the slider in two. One number
   cannot express "compress the soundtrack hard but barely touch the picture",
   which is an ordinary thing to want. Re-linking takes the midpoint of the two.
 - **The caption under each graph says what the setting does**, in numbers: at the
-  default, "dark scenes 2.9× brighter / whites 14% softer" and "quiet parts
+  default, "dark scenes 2.9× brighter / whites 28% softer" and "quiet parts
   +9 dB / loud-to-quiet gap −9 dB". Those come from `core/readings.ts`, which
   derives them from the same curve and transfer functions the engines use, so a
   caption cannot describe an effect the extension is not applying. Figures are
@@ -430,18 +433,60 @@ Choices worth explaining:
 
 ## Video processing
 
-The effect is a per-pixel transfer function, not a brightness reduction:
+The effect is a per-pixel transfer function, not a brightness reduction — and
+it is **scene-gated**: dark scenes engage the shadow machinery, scenes over the
+light budget engage the exposure dim and the highlight shoulder, and a scene
+that needs neither renders through an identity curve. Applying night
+corrections to content that needs none is precisely what washes an image out.
 
-1. **exposure** — `v = x · exposure`, only ever below 1, and only for scenes
-   that measure bright.
+Note the shape of that gate. "Washed out" and "untouched" are not the same
+requirement, and conflating them is how the effect ended up doing nothing useful
+to a bright scene: dimming by a scale is not washing out, and a night extension
+that refuses to dim anything it considers normally exposed has given up on its
+one job. What must never happen to a scene that did not ask for it is a lifted
+black point, a gamma-brightened mid-tone or a flattened top.
+
+1. **exposure** — `v = x · exposure`, only ever below 1. The multiplier is
+   whatever lands the frame's *emitted light* on a fixed comfort budget:
+   `exposure = comfortLight / light`, floored by what the strength slider
+   allows. Below the budget nothing happens, so there is a genuine dead band;
+   above it the dim is proportional to how far over the frame is.
 2. **shadow opening** — `v = v^(1/γ)` plus a small absolute black lift, so
-   near-black detail separates instead of staying crushed.
+   near-black detail separates instead of staying crushed. Engages only as the
+   scene as a whole reads dark, and is vetoed outright once the frame is
+   emitting real light: a well-exposed frame legitimately contains true blacks,
+   and those stay black.
 3. **highlight shoulder** — above a knee `k`, `v = k + a·(1 − e^−((v−k)/a))`.
    Slope is exactly 1 at the knee and decreases from there, so mid-tone contrast
    survives while highlights compress instead of clipping. `a` is solved by
-   bisection so input 1.0 lands exactly on the requested white point.
-4. **saturation compensation** — a per-channel curve desaturates slightly; a
-   final `feColorMatrix type="saturate"` puts it back.
+   bisection so full-scale input lands exactly on the requested white point.
+   Both `k` and the white point are fractions of the range exposure has left,
+   not of full scale, so the two stages cannot dim the same highlights twice.
+   Engages for actual glare (a hot top decile, or a bright scene), and stays
+   armed at a reduced level during dark scenes so a hard cut to white is already
+   caught on its first frame.
+4. **slope allocation** — a curve that dims has less output range than input
+   range, so some contrast is going to be lost; the only question is where from.
+   A fixed shoulder always spends it at the top, which on a bright scene is
+   exactly where the pixels are densest. Given the frame histogram the LUT's
+   per-interval slopes are instead rescaled towards the levels the scene
+   actually occupies and away from the empty ones — clipped at 3× a level's fair
+   share so a large flat region cannot claim slope for its own noise, bounded to
+   0.55–1.8× per interval, and engaged in proportion to the range the dimming
+   just gave up, so a scene being left alone is left alone by this stage too.
+5. **saturation compensation** — the shadow gamma flattens colour slightly; a
+   final `feColorMatrix type="saturate"` puts it back, scaled by how engaged
+   the lift is, so an untouched scene also keeps untouched colour.
+
+The measurement driving all of this is **linear light**, not encoded luma. The
+mean of a frame's gamma-encoded luma says how dark it *looks*, and is dominated
+by however much of the frame happens to be dark; a dashcam shot that is half
+black dashboard and half overcast sky reads as a perfectly ordinary scene by
+that measure while the sky goes on glaring. `computeSceneStats` therefore also
+averages in linear light and re-encodes the result, which answers the question
+that actually matters — how much light is coming off the screen — and it is that
+figure the exposure servo and the shadow-lift veto both run off. It costs 64
+`pow` calls per analysed frame, one per histogram bin, rather than one per pixel.
 
 Sampled into a 33-entry LUT and applied by the compositor through an SVG filter:
 
@@ -458,31 +503,48 @@ Sampled into a 33-entry LUT and applied by the compositor through an SVG filter:
 video[data-nn-tone="1"] { filter: url("#nn-tone-curve") !important; }
 ```
 
-Curve output for a given input level:
+Curve output for a given input level, after settling on each scene type. The
+last column is the frame's emitted light before and after, which is the number
+the effect is actually for:
 
-| input | 0.00 | 0.05 | 0.25 | 0.50 | 0.90 | 1.00 |
-| --- | --- | --- | --- | --- | --- | --- |
-| strength 45, dark scene | 0.028 | 0.134 | 0.376 | 0.610 | 0.844 | 0.871 |
-| strength 45, bright scene | 0.019 | 0.107 | 0.341 | 0.581 | 0.868 | 0.911 |
-| strength 100, full | 0.075 | 0.274 | 0.509 | 0.598 | 0.644 | 0.650 |
+| input | 0.00 | 0.05 | 0.25 | 0.50 | 0.90 | 1.00 | light |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| strength 45, dark scene | 0.028 | 0.203 | 0.510 | 0.700 | 0.903 | 0.925 | 0.19 → 0.36 |
+| strength 45, normal scene | 0.000 | 0.021 | 0.189 | 0.410 | 0.700 | 0.717 | 0.49 → 0.39 |
+| strength 45, dashcam clip | 0.000 | 0.053 | 0.191 | 0.461 | 0.705 | 0.726 | 0.46 → 0.38 |
+| strength 45, bright scene | 0.000 | 0.021 | 0.196 | 0.392 | 0.697 | 0.714 | 0.61 → 0.48 |
+| strength 100, bright scene | 0.000 | 0.016 | 0.144 | 0.287 | 0.453 | 0.459 | 0.61 → 0.34 |
 
-At the default, deep shadows gain roughly 2.7×, mid-tones move moderately, and
-white is pulled back to 0.87 — the "painful whites" problem. Note the two
-strength-45 rows: the same setting opens shadows harder on a dark scene and
-holds highlights back harder on a bright one. That is the adaptation working.
+At the default, a dark scene has its deep shadows opened roughly 2.9× and is the
+one case that ends up emitting *more* light — that is what the shadow lift is
+for, and its ceiling is the comfort budget the other rows are being pulled down
+to. Everything over that budget loses about a fifth of its light output with its
+blacks left at zero, its colour untouched and every ratio below the shoulder
+intact: it reads as "the brightness came down", not "the contrast went".
+
+The "dashcam clip" row is the case that motivated the light-based drive. Its
+encoded mean is 0.34 — squarely normal, and under the old mean-driven
+classifier it got no exposure dim at all, only a shoulder that shaved ~10% off
+the top decile while leaving the frame's total light output unchanged. Measured
+in linear light it is a 0.46, well over budget, and it now comes down as a
+bright scene should.
 
 Verified against *rendered pixels*, not just the maths: the smoke test
-screenshots a static grey-ramp video through the compositor.
+screenshots two static grey-ramp videos — one full-range (a normal scene) and
+one scaled into the shadows (a dark scene) — through the compositor.
 
-| measured on the screenshot | strength 0 | strength 45 (default) | strength 100 |
-| --- | --- | --- | --- |
-| absolute black | 0.000 | 0.027 | 0.071 |
-| shadow detail (5th–20th percentile) | 0.010 | 0.052 | 0.117 |
-| brightest decile | 1.000 | 0.816 | 0.639 |
-| overall mean | 0.409 | 0.422 | 0.430 |
+| measured on the screenshot, strength 45 | normal ramp | dark ramp |
+| --- | --- | --- |
+| absolute black | 0.000 → 0.000 | 0.000 → 0.027 |
+| shadow detail (5th–20th percentile) | 0.010 → 0.014 | 0.003 → 0.038 |
+| brightest decile | 1.000 → 0.710 | 0.302 → 0.584 |
+| overall mean | 0.409 → 0.335 | 0.123 → 0.294 |
 
-Shadows come up, highlights come down, and the average stays put — the image is
-range-compressed rather than dimmed or washed out.
+The normal ramp keeps its blacks and its shadow band to within a single 8-bit
+code while its glare and its overall level come down; the dark ramp is the one
+that gets opened up. That split is the scene gating working, and the smoke test
+fails if either side leaks into the other — including if the "bright" side
+stops actually getting darker, which is a check of its own.
 
 ### Why not canvas or WebGL?
 
@@ -519,9 +581,10 @@ Each measurement:
   10th percentile (shadow depth), 90th percentile and 99.5th percentile,
 - advances the state with **asymmetric time constants**: dimming uses τ = 0.3 s
   (react quickly to protect the viewer), recovery uses τ = 1.6 s (no visible
-  breathing). Shadow lift and highlight roll-off follow the measured shadow and
-  highlight levels, so dark scenes get opened up and bright scenes get held
-  back, rather than everything being flattened equally,
+  breathing). Shadow lift and highlight roll-off are gated on the measured
+  scene: dark scenes get opened up, scenes over the light budget get held back,
+  and a scene inside it converges on the identity curve instead of being
+  flattened,
 - rebuilds the LUT and writes it to the filter, but only if it changed.
 
 A 250 ms timer handles upkeep only (our nodes, the primary choice, fullscreen).
@@ -537,7 +600,7 @@ per-sample delta, so it means the same thing whether we are sampling at 60 Hz or
 white point down (a further 0.45 × the flash amount), then decays with τ =
 0.55 s. Both parts matter: exposure alone gets damped by the shoulder exactly
 where the glare is. Measured on a controlled white flash at the default
-strength, the encoded white level goes 0.819 → 0.741 and back.
+strength, the encoded white level goes 0.842 → 0.744 and back.
 
 Its honest limit: this is a *reactive* guard. It measures a frame that has
 already been presented, so the dim lands on the following frame (~16 ms at
@@ -609,6 +672,16 @@ Consequences:
   they are tone-mapped too (slightly less blinding white — usually desirable).
   Site-rendered subtitle layers, such as YouTube's, are outside the video element
   and untouched.
+- **The curve is global, not local.** `feComponentTransfer` is genuinely
+  per-pixel, but it is one lookup table for the whole frame: the same input
+  level maps to the same output level wherever it appears, with no knowledge of
+  what a pixel's neighbours are doing. So a frame containing both a blown
+  window and a face in shadow can only be traded off, not solved — dimming the
+  window necessarily dims everything at that level. The histogram-driven slope
+  allocation is what buys back most of the difference; genuinely local tone
+  mapping would need a spatial filter graph (`feGaussianBlur` plus arithmetic
+  `feComposite`), which is possible on the same compositor path and is not done
+  here.
 - **Very high-resolution video with a filter** can push some GPU/driver
   combinations onto a slower compositing path. If a 4K stream stutters, lower the
   strength or turn video processing off for that session.
@@ -719,7 +792,7 @@ Chrome will then only inject the content script on those sites.
 
 ## Testing
 
-Unit tests (`npm test`, 298 tests) cover the strength → parameter mapping
+Unit tests (`npm test`, 302 tests) cover the strength → parameter mapping
 (including the night EQ and the transfer model the popup plots), tone-curve maths
 and adaptation behaviour (including sampling-rate-independent flash detection),
 the safety clipper, media discovery and duplicate prevention, settings
@@ -733,7 +806,7 @@ enough not to wrap), the SVG filter's DOM handling under jsdom (including the
 `<base href>` workaround and fullscreen re-parenting), and the status reporter's
 throttling.
 
-The end-to-end suite (`npm run smoke`, 69 checks) drives real headless Chrome
+The end-to-end suite (`npm run smoke`, 70 checks) drives real headless Chrome
 over the DevTools protocol: it installs the built extension, plays generated
 media, and asserts that the filter is applied, that the curve *changes across a
 scene change*, that **screenshotted pixels** show lifted shadows and compressed

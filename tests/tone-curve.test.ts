@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  LIFT_FLOOR,
-  ROLL_FLOOR,
+  COMFORT_LIGHT,
+  DARK_LIFT_FLOOR,
+  DARK_ROLL_FLOOR,
+  HIST_BINS,
   adaptBounds,
   applyCurve,
   buildToneCurve,
@@ -10,8 +12,11 @@ import {
   cssApproxFilter,
   curveToTableValues,
   resolveCurve,
+  slopeWeights,
   solveKneeScale,
   staticAdaptState,
+  toEncodedLight,
+  toLinearLight,
   updateAdaptState,
   type SceneStats,
 } from '../src/core/tone-curve';
@@ -39,6 +44,7 @@ describe('computeSceneStats', () => {
       shadow: 0,
       highlight: 0,
       peak: 0,
+      light: 0,
     });
   });
 
@@ -341,34 +347,376 @@ describe('updateAdaptState', () => {
   });
 });
 
+describe('scene gating (the washed-out-normal-video regression)', () => {
+  // The original release applied the night curve to every scene: global floors
+  // on the lift and roll-off meant a normally exposed video had its blacks
+  // greyed, its mid-tones gamma-brightened and its whites pulled down — washed
+  // out and sometimes brighter than the original. These tests pin the fix.
+  //
+  // The invariant is "never washed out", not "never touched": a frame over the
+  // light budget is dimmed on purpose, and dimming by a scale is not washing
+  // out. What must never happen is a lifted black point, a gamma-brightened
+  // mid-tone or a flattened top on a scene that did not ask for one.
+  const settle = (p: ReturnType<typeof mapVideoStrength>, s: SceneStats, ticks = 80) => {
+    let state = createAdaptState();
+    for (let i = 0; i < ticks; i++) state = updateAdaptState(state, s, p, 0.125);
+    return state;
+  };
+
+  it('leaves a scene inside the light budget completely alone', () => {
+    // The dead band, and the proof that the exposure servo is not simply
+    // dimming everything: a mid-exposed frame that is not throwing much light
+    // gets the identity, not a slightly-dimmer version of itself.
+    const defaults = mapVideoStrength(45);
+    const state = settle(defaults, {
+      mean: 0.35,
+      shadow: 0.2,
+      highlight: 0.52,
+      peak: 0.6,
+      light: COMFORT_LIGHT,
+    });
+    const resolved = resolveCurve(defaults, state);
+    expect(resolved.exposure).toBeCloseTo(1, 6);
+    expect(resolved.lift).toBe(0);
+    expect(resolved.gamma).toBe(1);
+    for (const x of [0, 0.25, 0.5, 0.75, 1]) {
+      expect(applyCurve(resolved, x)).toBeCloseTo(x, 6);
+    }
+  });
+
+  it('dims a normally exposed video without washing it out', () => {
+    // A normal frame that *is* over the light budget does come down — that is
+    // the whole job at night — but it comes down by a clean scale. Nothing
+    // greys the blacks, nothing flattens the mid-tones, nothing touches the
+    // colour: it reads as "the brightness came down", not "the contrast went".
+    const defaults = mapVideoStrength(45);
+    const state = settle(defaults, { mean: 0.45, shadow: 0.12, highlight: 0.78, peak: 0.9 });
+    const resolved = resolveCurve(defaults, state);
+    expect(resolved.lift).toBe(0);
+    expect(resolved.gamma).toBe(1);
+    expect(resolved.saturation).toBe(1);
+    expect(applyCurve(resolved, 0)).toBe(0); // blacks stay black
+    expect(resolved.exposure).toBeLessThan(0.95); // ...and it really is dimmer
+    // Everything below the shoulder is the input times one constant, so every
+    // ratio in the picture survives intact.
+    for (const x of [0.1, 0.25, 0.5]) {
+      expect(applyCurve(resolved, x)).toBeCloseTo(x * resolved.exposure, 6);
+    }
+  });
+
+  it('does not treat ordinary true blacks in a normal scene as crushed shadows', () => {
+    // A well-exposed frame legitimately contains near-black pixels; that alone
+    // must not engage the night lift.
+    const defaults = mapVideoStrength(45);
+    const state = settle(defaults, { mean: 0.4, shadow: 0.02, highlight: 0.7, peak: 0.85 });
+    expect(state.liftScale).toBeLessThan(0.01);
+    expect(resolveCurve(defaults, state).lift).toBeLessThan(0.001);
+  });
+
+  it('dims a bright scene without lifting its blacks or flattening mid-tones', () => {
+    const defaults = mapVideoStrength(45);
+    const state = settle(defaults, { mean: 0.7, shadow: 0.35, highlight: 0.9, peak: 0.98 });
+    const resolved = resolveCurve(defaults, state);
+    expect(resolved.exposure).toBeCloseTo(defaults.adapt.minExposure, 2);
+    expect(resolved.lift).toBe(0);
+    expect(resolved.gamma).toBe(1);
+    expect(applyCurve(resolved, 0)).toBe(0);
+    // Whites are genuinely neutralised...
+    expect(applyCurve(resolved, 1)).toBeLessThan(0.87);
+    // ...while dark detail scales with the exposure instead of being greyed:
+    // the result reads as "the brightness came down", not "the contrast went".
+    expect(applyCurve(resolved, 0.1)).toBeCloseTo(0.1 * resolved.exposure, 3);
+  });
+
+  it('still fully engages on a dark scene (the half that already worked)', () => {
+    const defaults = mapVideoStrength(45);
+    const state = settle(defaults, { mean: 0.12, shadow: 0.03, highlight: 0.3, peak: 0.4 });
+    expect(state.liftScale).toBeGreaterThanOrEqual(DARK_LIFT_FLOOR);
+    expect(state.rollScale).toBeCloseTo(DARK_ROLL_FLOOR, 2);
+    const resolved = resolveCurve(defaults, state);
+    expect(applyCurve(resolved, 0.05)).toBeGreaterThan(0.1); // >2x on deep shadow
+    expect(resolved.saturation).toBeGreaterThan(1.05);
+  });
+});
+
+/**
+ * A frame built from flat regions, as `[encoded luma, fraction of the frame]`.
+ * Enough to reproduce the shapes that broke the mean-driven classifier.
+ */
+function sceneFrame(regions: Array<[number, number]>, pixels = 48 * 27): Uint8ClampedArray {
+  const data = new Uint8ClampedArray(pixels * 4);
+  let i = 0;
+  for (const [luma, fraction] of regions) {
+    const value = Math.round(luma * 255);
+    for (let k = 0; k < Math.round(fraction * pixels) && i < pixels; k++, i++) {
+      data[i * 4] = value;
+      data[i * 4 + 1] = value;
+      data[i * 4 + 2] = value;
+      data[i * 4 + 3] = 255;
+    }
+  }
+  for (; i < pixels; i++) data[i * 4 + 3] = 255;
+  return data;
+}
+
+/** Emitted light of a frame after the curve, on the same scale as `stats.light`. */
+function litAfter(stats: SceneStats, curve: readonly number[]): number {
+  const at = (x: number): number => {
+    const position = x * (curve.length - 1);
+    const low = Math.floor(position);
+    const high = Math.min(curve.length - 1, low + 1);
+    const a = curve[low] as number;
+    return a + ((curve[high] as number) - a) * (position - low);
+  };
+  let linear = 0;
+  for (let bin = 0; bin < HIST_BINS; bin++) {
+    const share = (stats.histogram?.[bin] as number) ?? 0;
+    linear += share * toLinearLight(at((bin + 0.5) / HIST_BINS));
+  }
+  return toEncodedLight(linear);
+}
+
+const settleOn = (p: ReturnType<typeof mapVideoStrength>, stats: SceneStats, ticks = 300) => {
+  let state = createAdaptState();
+  for (let i = 0; i < ticks; i++) state = updateAdaptState(state, stats, p, 1 / 30);
+  return state;
+};
+
+// The dashcam clip that motivated all of this: a black car interior filling the
+// bottom of the frame, an overcast sky filling the top. Its encoded mean is
+// ordinary; the light coming off the screen is not.
+const DASHCAM: Array<[number, number]> = [
+  [0.06, 0.45],
+  [0.78, 0.25],
+  [0.45, 0.15],
+  [0.35, 0.15],
+];
+// A real night scene: dark, and genuinely emitting very little.
+const NIGHT: Array<[number, number]> = [
+  [0.03, 0.5],
+  [0.12, 0.3],
+  [0.25, 0.15],
+  [0.6, 0.05],
+];
+
+describe('linear-light measurement', () => {
+  it('reads emitted light, not how dark the frame looks', () => {
+    const stats = computeSceneStats(sceneFrame(DASHCAM));
+    // The encoded mean says "ordinary scene"; the light says otherwise, and the
+    // gap between them is the whole bug: half the frame being black dragged the
+    // mean down while the sky went on glaring.
+    expect(stats.mean).toBeLessThan(0.36);
+    expect(stats.light as number).toBeGreaterThan(0.44);
+  });
+
+  it('never reads below the encoded mean, and matches it on a flat frame', () => {
+    for (const luma of [0.05, 0.2, 0.5, 0.8, 1]) {
+      // Within a histogram bin of each other: `light` is summed off the bin
+      // centres, which is far below the precision the adaptation acts on.
+      const flat = computeSceneStats(flatFrame(luma, 256));
+      expect(Math.abs((flat.light as number) - flat.mean)).toBeLessThan(1 / HIST_BINS);
+    }
+    for (const regions of [DASHCAM, NIGHT]) {
+      const stats = computeSceneStats(sceneFrame(regions));
+      expect(stats.light as number).toBeGreaterThanOrEqual(stats.mean);
+    }
+  });
+
+  it('still reports usable percentiles alongside the histogram', () => {
+    // Regression guard: normalising the bins in place used to happen before the
+    // percentiles were read off them, which silently pinned all three to 1.
+    const stats = computeSceneStats(sceneFrame(DASHCAM));
+    expect(stats.shadow).toBeLessThan(0.15);
+    expect(stats.highlight).toBeGreaterThan(0.7);
+    expect(stats.peak).toBeGreaterThanOrEqual(stats.highlight);
+    const sum = [...(stats.histogram as Float32Array)].reduce((a, b) => a + b, 0);
+    expect(sum).toBeCloseTo(1, 6);
+  });
+});
+
+describe('a bright scene inside a dark frame', () => {
+  const defaults = mapVideoStrength(45);
+
+  it('is not mistaken for a night scene', () => {
+    // The reported failure: the extension made this frame *brighter*, because
+    // the mean and the near-black interior together read as "crushed shadows".
+    const state = settleOn(defaults, computeSceneStats(sceneFrame(DASHCAM)));
+    expect(state.liftScale).toBeLessThan(0.01);
+    const resolved = resolveCurve(defaults, state);
+    expect(resolved.lift).toBe(0);
+    expect(resolved.gamma).toBe(1);
+    expect(applyCurve(resolved, 0.06)).toBeLessThan(0.06); // the interior stays dark
+  });
+
+  it('actually comes down instead of only losing its highlights', () => {
+    const stats = computeSceneStats(sceneFrame(DASHCAM));
+    const state = settleOn(defaults, stats);
+    const curve = buildToneCurve(defaults, state, 65);
+    const after = litAfter(stats, curve);
+    // The old behaviour: exposure never engaged, the shoulder shaved ~10% off
+    // the very brightest pixels, and the frame as a whole emitted just as much
+    // light as before.
+    expect(after).toBeLessThan((stats.light as number) * 0.9);
+  });
+
+  it('leaves a genuinely dark scene to the shadow lift', () => {
+    // The veto keys on emitted light, so it must not fire on real night
+    // content just because that content also has a bright element in it.
+    const state = settleOn(defaults, computeSceneStats(sceneFrame(NIGHT)));
+    expect(state.liftScale).toBeGreaterThan(DARK_LIFT_FLOOR);
+    expect(state.exposure).toBeCloseTo(1, 6);
+  });
+});
+
+describe('slope allocation', () => {
+  const defaults = mapVideoStrength(45);
+  const stats = computeSceneStats(sceneFrame(DASHCAM));
+  const state = settleOn(defaults, stats);
+
+  const slope = (curve: readonly number[], a: number, b: number): number => {
+    const i = Math.round(a * (curve.length - 1));
+    const j = Math.round(b * (curve.length - 1));
+    return ((curve[j] as number) - (curve[i] as number)) / (b - a);
+  };
+
+  it('keeps more contrast where the scene actually lives', () => {
+    const allocated = buildToneCurve(defaults, state, 65);
+    const plain = buildToneCurve(defaults, { ...state, histogram: null }, 65);
+    // The fixed shoulder spends its slope at the top of the range, which on a
+    // bright scene is exactly where the pixels are densest.
+    expect(slope(allocated, 0.4, 0.6)).toBeGreaterThan(slope(plain, 0.4, 0.6));
+    expect(slope(allocated, 0.75, 0.95)).toBeGreaterThan(slope(plain, 0.75, 0.95));
+  });
+
+  it('redistributes contrast without changing the endpoints', () => {
+    const allocated = buildToneCurve(defaults, state, 65);
+    const plain = buildToneCurve(defaults, { ...state, histogram: null }, 65);
+    expect(allocated[0] as number).toBeCloseTo(plain[0] as number, 6);
+    expect(allocated.at(-1) as number).toBeCloseTo(plain.at(-1) as number, 6);
+  });
+
+  it('stays monotonic and bounded on every scene and strength', () => {
+    for (const strength of [1, 20, 45, 70, 100]) {
+      const params = mapVideoStrength(strength);
+      for (const regions of [DASHCAM, NIGHT, [[0.9, 1]] as Array<[number, number]>]) {
+        const scene = computeSceneStats(sceneFrame(regions));
+        const curve = buildToneCurve(params, settleOn(params, scene), 65);
+        for (let i = 0; i < curve.length; i++) {
+          const value = curve[i] as number;
+          expect(Number.isFinite(value)).toBe(true);
+          expect(value).toBeGreaterThanOrEqual(0);
+          expect(value).toBeLessThanOrEqual(1);
+          if (i > 0) expect(value).toBeGreaterThanOrEqual(curve[i - 1] as number);
+        }
+      }
+    }
+  });
+
+  it('does nothing to a curve that is not giving anything up', () => {
+    // No dimming, nothing to pay back. A scene being left alone must be left
+    // alone by this stage too, rather than quietly contrast-enhanced.
+    const flat = new Float32Array(HIST_BINS).fill(1 / HIST_BINS);
+    expect(slopeWeights(flat, 32, 0)).toBeNull();
+
+    const inBudget: SceneStats = {
+      mean: 0.35,
+      shadow: 0.2,
+      highlight: 0.52,
+      peak: 0.6,
+      light: COMFORT_LIGHT,
+      histogram: computeSceneStats(sceneFrame([[0.35, 1]])).histogram,
+    };
+    const curve = buildToneCurve(defaults, settleOn(defaults, inBudget), 33);
+    curve.forEach((value, i) => expect(value).toBeCloseTo(i / 32, 6));
+  });
+
+  it('caps how much any one level can claim', () => {
+    // A large flat region — a black dashboard, a letterbox bar — would take
+    // slope proportional to its area under plain equalisation and amplify its
+    // own noise for it. The bound is on the *rendered* curve, so it is measured
+    // against the unallocated one rather than off the raw weights.
+    const spike: Array<[number, number]> = [
+      [0.07, 0.9],
+      [0.5, 0.05],
+      [0.85, 0.05],
+    ];
+    const scene = computeSceneStats(sceneFrame(spike));
+    const spiked = settleOn(defaults, scene);
+    const allocated = buildToneCurve(defaults, spiked, 65);
+    const plain = buildToneCurve(defaults, { ...spiked, histogram: null }, 65);
+    for (let i = 0; i < allocated.length - 1; i++) {
+      const was = (plain[i + 1] as number) - (plain[i] as number);
+      const now = (allocated[i + 1] as number) - (allocated[i] as number);
+      expect(now).toBeGreaterThanOrEqual(was * 0.55 - 1e-9);
+      expect(now).toBeLessThanOrEqual(was * 1.8 + 1e-9);
+    }
+    // ...and the cap must not cost the frame any overall range: what is taken
+    // from one level has to be given to another.
+    expect(allocated.at(-1) as number).toBeCloseTo(plain.at(-1) as number, 6);
+  });
+
+  it('produces weights that only say where slope should go, not how much', () => {
+    const flat = new Float32Array(HIST_BINS).fill(1 / HIST_BINS);
+    expect(slopeWeights(flat, 32, 1)).not.toBeNull();
+    for (const regions of [DASHCAM, NIGHT]) {
+      const scene = computeSceneStats(sceneFrame(regions));
+      const weights = slopeWeights(scene.histogram as Float32Array, 32, 1) as Float64Array;
+      for (const weight of weights) expect(weight).toBeGreaterThan(0);
+      expect([...weights].reduce((a, b) => a + b, 0) / weights.length).toBeCloseTo(1, 6);
+    }
+  });
+
+  it('smooths the histogram over time so the curve cannot pump', () => {
+    const params = mapVideoStrength(45);
+    let state = createAdaptState();
+    const dark = computeSceneStats(sceneFrame(NIGHT));
+    const bright = computeSceneStats(sceneFrame(DASHCAM));
+    for (let i = 0; i < 60; i++) state = updateAdaptState(state, dark, params, 1 / 30);
+    const before = state.histogram as Float32Array;
+    const next = updateAdaptState(state, bright, params, 1 / 30).histogram as Float32Array;
+    // One frame of a completely different scene may only move the histogram a
+    // fraction of the way, or the LUT would jump on every noisy frame.
+    let moved = 0;
+    for (let bin = 0; bin < HIST_BINS; bin++) {
+      moved += Math.abs((next[bin] as number) - (before[bin] as number));
+    }
+    expect(moved).toBeGreaterThan(0);
+    expect(moved).toBeLessThan(0.4);
+  });
+});
+
 describe('adaptBounds', () => {
   it('brackets the adaptive range', () => {
-    const { bright, dark } = adaptBounds();
+    const { bright, dark } = adaptBounds(params);
     expect(dark.liftScale).toBeGreaterThan(bright.liftScale);
     expect(bright.rollScale).toBeGreaterThan(dark.rollScale);
-    expect(bright.liftScale).toBeCloseTo(LIFT_FLOOR, 6);
-    expect(dark.rollScale).toBeCloseTo(ROLL_FLOOR, 6);
+    // A bright scene gets no shadow lift at all, and a dark one keeps the
+    // shoulder armed at its dark-scene floor.
+    expect(bright.liftScale).toBe(0);
+    expect(dark.rollScale).toBeCloseTo(DARK_ROLL_FLOOR, 6);
+    // Bright scenes are additionally dimmed; dark scenes never are.
+    expect(bright.exposure).toBeCloseTo(params.adapt.minExposure, 6);
+    expect(dark.exposure).toBe(1);
     for (const state of [bright, dark]) {
       expect(state.flash).toBe(0);
-      expect(state.exposure).toBe(1);
       expect(state.initialized).toBe(true);
     }
   });
 
   it('collapses onto the identity when bypassed', () => {
     const bypass = mapVideoStrength(0);
-    const { bright, dark } = adaptBounds();
+    const { bright, dark } = adaptBounds(bypass);
     expect(buildToneCurve(bypass, dark, 5)).toEqual(buildToneCurve(bypass, bright, 5));
   });
 
   it('opens shadows more at the dark end and holds highlights more at the bright end', () => {
-    const params = mapVideoStrength(45);
-    const { bright, dark } = adaptBounds();
-    expect(applyCurve(resolveCurve(params, dark), 0.05)).toBeGreaterThan(
-      applyCurve(resolveCurve(params, bright), 0.05),
+    const p = mapVideoStrength(45);
+    const { bright, dark } = adaptBounds(p);
+    expect(applyCurve(resolveCurve(p, dark), 0.05)).toBeGreaterThan(
+      applyCurve(resolveCurve(p, bright), 0.05),
     );
-    expect(resolveCurve(params, bright).whitePoint).toBeLessThan(
-      resolveCurve(params, dark).whitePoint,
+    expect(applyCurve(resolveCurve(p, bright), 1)).toBeLessThan(
+      applyCurve(resolveCurve(p, dark), 1),
     );
   });
 });

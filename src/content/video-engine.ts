@@ -24,6 +24,7 @@ import {
   createAdaptState,
   cssApproxFilter,
   curveToTableValues,
+  resolveCurve,
   staticAdaptState,
   updateAdaptState,
   type AdaptState,
@@ -356,7 +357,10 @@ export class VideoEngine {
     this.lastPushAt = at;
 
     const curve = buildToneCurve(this.params, this.state);
-    this.filter.setCurve(curveToTableValues(curve), this.params.saturation);
+    // Saturation compensation follows the lift, so it disengages together with
+    // the rest of the curve on scenes that need no correction.
+    const saturation = this.params.bypass ? 1 : resolveCurve(this.params, this.state).saturation;
+    this.filter.setCurve(curveToTableValues(curve), saturation);
     if (this.filter.getTechnique() === 'css-basic') {
       this.filter.setFallbackCss(cssApproxFilter(this.params, this.state));
       this.note('SVG filters unavailable: using an approximate CSS curve.');

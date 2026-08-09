@@ -13,13 +13,13 @@ npm run smoke    # end-to-end in headless Chrome
 
 ## 1. Automated: unit tests
 
-`npm test` — 298 tests, no browser required.
+`npm test` — 302 tests, no browser required.
 
 | file | covers |
 | --- | --- |
 | `tests/strength.test.ts` | strength → processing parameters: true bypass at 0, clamping and non-finite input, monotonicity across all 101 values, release lengthening with strength, **make-up gain that accounts for Chromium's own internal make-up** and keeps the modelled peak below full scale at every strength, **a bounded safety stage always present**, quiet boosted more than loud with the range never inverting, every value inside the Web Audio legal range, no discontinuity next to bypass |
 | `tests/soft-clip.test.ts` | safety clipper: exact identity below the knee, never exceeding the ceiling for input up to 50× full scale, monotonic and symmetric, less than 1 dB cost to a full-scale signal, decreasing slope, curve sampling (odd length, exact zero, identity samples on the identity line), identity params producing a straight line |
-| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, CSS fallback shape |
+| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **scene gating: a scene inside the light budget converges on the identity, a normally exposed scene over it is dimmed by a clean scale (blacks stay black, saturation untouched, every ratio below the shoulder preserved), ordinary true blacks do not count as crushed shadows, and a bright scene is dimmed without being lifted**, **linear-light measurement reading emitted light rather than how dark a frame looks, and percentiles surviving histogram normalisation**, **a bright scene inside a dark frame: not mistaken for a night scene, and its light output really coming down rather than only its top decile**, **slope allocation: more contrast where the scene lives, endpoints unmoved, monotonic and bounded on every scene and strength, capped so a flat region cannot claim slope for its own noise, disengaged entirely when the curve is giving nothing up, and time-smoothed so the LUT cannot pump**, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, CSS fallback shape |
 | `tests/media-registry.test.ts` | discovery before and after start, dynamic insertion, **duplicate prevention** (re-attach, rescan, DOM move), open shadow roots (and closed ones ignored), removal only after the grace period, re-parented elements surviving, subtree removal, element swap, mutation-storm rescan, throwing handlers, `stop()`/`release()`, idempotent `start()` |
 | `tests/settings.test.ts` | sanitisation of missing/garbage/hostile values, clamping and rounding, unknown keys dropped, save→load round-trip through a fresh store, storage failure falling back to defaults, `ensureDefaults` writing only once, reset, change notifications, ignoring other areas/keys, unsubscribe not leaking listeners, **migration of pre-split settings** (the old single `strength` mirrored into both channels), exclusion-list cleaning, **the default exclusion array never being shared with stored settings**, effective strength with the link on and off |
 | `tests/site.test.ts` | hostname normalisation (case, `www.`, ports, credentials, trailing dots, IPv6 literals, full URLs, opaque origins), **site keys derived from `location.ancestorOrigins`** so an embedded player is governed by the page it is embedded in, subdomain coverage without matching lookalike hosts (`example.com` covers `news.example.com` but not `notexample.com`), a stray empty entry not disabling the whole web, add/remove including collapsing subdomains under a newly added parent and removing a covering parent when a subdomain is re-enabled, list capping |
@@ -41,7 +41,7 @@ npm run smoke
 
 Installs the built extension into a throwaway Chrome profile over the DevTools
 protocol (`Extensions.loadUnpacked`; Chrome 137+ ignores `--load-extension`),
-serves the test bench, and asserts 69 checks.
+serves the test bench, and asserts 70 checks.
 
 Note that the suite writes `nightOnly: false` and `skipMusic: false` into its
 baseline settings. The shipped defaults only process between 21:00 and 07:00 and
@@ -202,11 +202,15 @@ extension only processes `<video>`, so the canvas is your unprocessed reference.
 4. **Remove it** → cleanup happens after the 4 s grace period; the popup count
    drops.
 
-**Static test pattern, section 4.** Toggle the extension while looking at the
-ramp: the eight very dark steps should separate from black, the white patch
-should visibly pull back from pure white, and the middle of the ramp should stay
-roughly where it was. If the whole ramp just gets darker or lighter, something is
-wrong.
+**Static test patterns, section 4.** The curve adapts to the *primary* video —
+the largest playing one — so pause the other videos while judging a ramp. The
+full-range ramp is well over the light budget, so with the extension toggled the
+whole ramp should come down in level while its blacks stay pinned at black and
+its steps stay clearly separated. Two different failures to watch for: if the
+dark steps *lift* off black or the ramp goes grey, the washed-out regression is
+back; if only the white patch moves and the rest of the ramp sits exactly where
+it was, the exposure servo has stopped engaging. The dark ramp reads as a night
+scene instead: its very dark steps should clearly separate from black.
 
 To test the flash guard by hand, run `nnFlashWedge()` in the page console (or
 `nnFlashWedge(600)` for a longer one) while watching the white patch: it should

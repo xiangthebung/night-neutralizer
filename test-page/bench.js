@@ -35,29 +35,38 @@ document.getElementById('fullscreen').addEventListener('click', () => {
  * A fixed 32-step grey ramp plus solid black and white patches. Redrawn twice a
  * second so the capture stream keeps producing frames, but visually constant,
  * which makes before/after pixel comparisons meaningful.
+ *
+ * Drawn twice: at full range (reads as a normal scene, must stay essentially
+ * untouched) and scaled down to 30% (reads as a dark scene, must get its
+ * shadows lifted). The pair is what pins the scene gating at the pixel level.
  */
 const wedgeCanvas = document.getElementById('wedge-source');
 const wedgeCtx = wedgeCanvas.getContext('2d');
+const nightWedgeCanvas = document.getElementById('night-wedge-source');
+const nightWedgeCtx = nightWedgeCanvas.getContext('2d');
+const NIGHT_WEDGE_SCALE = 0.3;
 
-function drawWedgePattern() {
-  const { width, height } = wedgeCanvas;
+function drawWedgePattern(ctx, canvas, scale = 1) {
+  const { width, height } = canvas;
   const steps = 32;
   const w = width / steps;
+  const level = (value) => Math.round(value * scale);
   for (let i = 0; i < steps; i++) {
-    const value = Math.round((i / (steps - 1)) * 255);
-    wedgeCtx.fillStyle = `rgb(${value},${value},${value})`;
-    wedgeCtx.fillRect(i * w, 0, w + 1, height * 0.6);
+    const value = level((i / (steps - 1)) * 255);
+    ctx.fillStyle = `rgb(${value},${value},${value})`;
+    ctx.fillRect(i * w, 0, w + 1, height * 0.6);
   }
   // Dedicated shadow band: 8 very dark steps.
   for (let i = 0; i < 8; i++) {
-    const value = i * 4;
-    wedgeCtx.fillStyle = `rgb(${value},${value},${value})`;
-    wedgeCtx.fillRect((i * width) / 8, height * 0.6, width / 8 + 1, height * 0.2);
+    const value = level(i * 4);
+    ctx.fillStyle = `rgb(${value},${value},${value})`;
+    ctx.fillRect((i * width) / 8, height * 0.6, width / 8 + 1, height * 0.2);
   }
-  wedgeCtx.fillStyle = 'rgb(0,0,0)';
-  wedgeCtx.fillRect(0, height * 0.8, width / 2, height * 0.2);
-  wedgeCtx.fillStyle = 'rgb(255,255,255)';
-  wedgeCtx.fillRect(width / 2, height * 0.8, width / 2, height * 0.2);
+  ctx.fillStyle = 'rgb(0,0,0)';
+  ctx.fillRect(0, height * 0.8, width / 2, height * 0.2);
+  const white = level(255);
+  ctx.fillStyle = `rgb(${white},${white},${white})`;
+  ctx.fillRect(width / 2, height * 0.8, width / 2, height * 0.2);
 }
 
 /**
@@ -73,17 +82,23 @@ function wedgeFrame() {
     wedgeCtx.fillStyle = 'rgb(255,255,255)';
     wedgeCtx.fillRect(0, 0, wedgeCanvas.width, wedgeCanvas.height);
   } else {
-    drawWedgePattern();
+    drawWedgePattern(wedgeCtx, wedgeCanvas);
   }
+  drawWedgePattern(nightWedgeCtx, nightWedgeCanvas, NIGHT_WEDGE_SCALE);
   requestAnimationFrame(wedgeFrame);
 }
 
-drawWedgePattern();
+drawWedgePattern(wedgeCtx, wedgeCanvas);
+drawWedgePattern(nightWedgeCtx, nightWedgeCanvas, NIGHT_WEDGE_SCALE);
 requestAnimationFrame(wedgeFrame);
 
 const wedge = document.getElementById('wedge');
 wedge.srcObject = wedgeCanvas.captureStream(30);
 wedge.play().catch(() => {});
+
+const nightWedge = document.getElementById('night-wedge');
+nightWedge.srcObject = nightWedgeCanvas.captureStream(30);
+nightWedge.play().catch(() => {});
 
 /**
  * Flash the pattern white for a moment, then return to exactly the same steady

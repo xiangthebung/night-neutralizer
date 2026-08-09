@@ -256,7 +256,7 @@ function drawCurve(strength: number): void {
   const { ctx, x, y } = frame;
 
   const params = mapVideoStrength(strength);
-  const bounds = adaptBounds();
+  const bounds = adaptBounds(params);
   const dark = buildToneCurve(params, bounds.dark, 65);
   const bright = buildToneCurve(params, bounds.bright, 65);
   const at = (curve: readonly number[], index: number): number => x(index / (curve.length - 1));

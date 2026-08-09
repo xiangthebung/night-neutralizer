@@ -31,7 +31,7 @@ describe('videoEffect', () => {
     // not from a plausible-looking approximation of them.
     for (const strength of [15, 45, 70, 100]) {
       const params = mapVideoStrength(strength);
-      const bounds = adaptBounds();
+      const bounds = adaptBounds(params);
       const lifted = buildToneCurve(params, bounds.dark, 65);
       const rolled = buildToneCurve(params, bounds.bright, 65);
       const effect = videoEffect(strength);
@@ -49,7 +49,7 @@ describe('videoEffect', () => {
     // bound understates the effect, which is what this guards against.
     const strength = 45;
     const params = mapVideoStrength(strength);
-    const bounds = adaptBounds();
+    const bounds = adaptBounds(params);
     const liftedWhite = 1 - (buildToneCurve(params, bounds.dark, 65).at(-1) as number);
     const rolledWhite = 1 - (buildToneCurve(params, bounds.bright, 65).at(-1) as number);
 
@@ -58,16 +58,14 @@ describe('videoEffect', () => {
   });
 
   it('matches the documented figures at the default strength', () => {
-    // README: at strength 45, input 0.05 -> 0.134 with the lift fully engaged,
-    // and white lands at 0.871 with the roll-off fully engaged. If either drifts,
-    // the documentation is now wrong too.
-    // The README quotes the nearest LUT entry (input 0.047), this interpolates at
-    // exactly 0.05, so the ratio here sits a little above the documented 2.7x.
+    // README: at strength 45, input 0.05 -> ~0.146 with the lift fully engaged,
+    // and white lands at ~0.71 on a fully bright scene (exposure dim plus
+    // roll-off). If either drifts, the documentation is now wrong too.
     const effect = videoEffect(45);
     expect(effect.shadowGain).toBeGreaterThan(2.6);
     expect(effect.shadowGain).toBeLessThan(3.1);
-    expect(effect.whiteDrop).toBeGreaterThan(0.11);
-    expect(effect.whiteDrop).toBeLessThan(0.15);
+    expect(effect.whiteDrop).toBeGreaterThan(0.26);
+    expect(effect.whiteDrop).toBeLessThan(0.31);
   });
 
   it('grows with strength and never inverts', () => {
@@ -138,7 +136,7 @@ describe('captions', () => {
 
   it('states the effect in numbers at the default strength', () => {
     expect(describeVideoEffect(45)[0]).toMatch(/^Dark scenes 2\.\d× brighter$/);
-    expect(describeVideoEffect(45)[1]).toMatch(/^Whites 1\d% softer$/);
+    expect(describeVideoEffect(45)[1]).toMatch(/^Whites \d\d% softer$/);
     expect(describeAudioEffect(45)[0]).toMatch(/^Quiet parts \+\d+ dB$/);
     expect(describeAudioEffect(45)[1]).toMatch(/^Loud-to-quiet gap −\d+ dB$/);
   });

@@ -232,9 +232,12 @@ describe('mapVideoStrength', () => {
     // effect was imperceptible at the default setting.
     const p = mapVideoStrength(DEFAULT_SETTINGS.strength);
     expect(p.shadowGamma).toBeGreaterThan(1.3);
-    expect(p.highlightCompression).toBeGreaterThan(0.1);
+    expect(p.highlightCompression).toBeGreaterThan(0.05);
     expect(p.adapt.flashDim).toBeGreaterThan(0.15);
-    expect(p.adapt.minExposure).toBeLessThan(0.9);
+    // Exposure, not the shoulder, is what makes a bright scene darker: the
+    // shoulder only softens the top of what exposure leaves. A ceiling of 0.9
+    // here was the reason bright scenes never visibly came down.
+    expect(p.adapt.minExposure).toBeLessThan(0.8);
   });
 
   it('compensates saturation as contrast is reduced', () => {

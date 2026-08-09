@@ -762,13 +762,24 @@ async function main() {
       page.eval(
         `document.querySelector('#nn-tone-curve feFuncR')?.getAttribute('tableValues') ?? ''`,
       );
-    const firstCurve = await curveNow();
+    // The curve is scene-gated: it starts as the identity and only moves once a
+    // frame that needs treatment has been measured, so poll rather than race.
+    // The animated clip cycles through dark and bright phases, either of which
+    // must move it within a cycle.
+    const deviatesFromIdentity = (raw) => {
+      const values = raw.split(' ').map(Number);
+      if (values.length < 2 || values.some((v) => !Number.isFinite(v))) return false;
+      return values.some((v, i) => Math.abs(v - i / (values.length - 1)) > 0.005);
+    };
+    let firstCurve = await curveNow();
+    const curveDeadline = Date.now() + 10_000;
+    while (!deviatesFromIdentity(firstCurve) && Date.now() < curveDeadline) {
+      await sleep(250);
+      firstCurve = await curveNow();
+    }
     check(
-      'tone curve lifts black and rolls off white',
-      (() => {
-        const values = firstCurve.split(' ').map(Number);
-        return values[0] > 0 && values[values.length - 1] < 1;
-      })(),
+      'tone curve engages once a scene needs treatment',
+      deviatesFromIdentity(firstCurve),
       `black=${firstCurve.split(' ')[0]} white=${firstCurve.split(' ').at(-1)}`,
     );
 
@@ -864,27 +875,43 @@ async function main() {
 
     /* -------- pixel-level proof that the curve is actually painted -------- */
     await page.send('Page.enable').catch(() => {});
-    // Pause the animated clip so the static wedge becomes the primary video and
-    // the measurement is not chasing a moving scene.
+    // Pause the animated clip so the static wedges become candidates for the
+    // primary video. The engine adapts one shared curve to the primary (the
+    // largest *playing* video), so each wedge is measured while it is the only
+    // one playing: the full-range wedge reads as a normal scene, the scaled
+    // wedge as a dark one, and the two must be treated differently.
     await page.eval(`document.getElementById('pause-video').click(); true`);
     // Page.captureScreenshot clips in *document* coordinates, so the scroll
     // offset has to be added to the viewport-relative rect.
-    const wedgeBox = await page.eval(
-      `(() => {
-         const v = document.getElementById('wedge');
-         v.scrollIntoView({ block: 'center' });
-         const r = v.getBoundingClientRect();
-         return JSON.stringify({
-           x: Math.round(r.x + window.scrollX) + 3,
-           y: Math.round(r.y + window.scrollY) + 3,
-           width: Math.round(r.width) - 6,
-           height: Math.round(r.height) - 6,
-         });
-       })()`,
-    );
-    const clip = { ...JSON.parse(wedgeBox), scale: 1 };
+    const wedgeBoxFor = async (id) => {
+      const raw = await page.eval(
+        `(() => {
+           const v = document.getElementById('${id}');
+           v.scrollIntoView({ block: 'center' });
+           const r = v.getBoundingClientRect();
+           return JSON.stringify({
+             x: Math.round(r.x + window.scrollX) + 3,
+             y: Math.round(r.y + window.scrollY) + 3,
+             width: Math.round(r.width) - 6,
+             height: Math.round(r.height) - 6,
+           });
+         })()`,
+      );
+      return { ...JSON.parse(raw), scale: 1 };
+    };
 
-    const captureWedge = async () => {
+    const soloWedge = async (playId, pauseId) => {
+      await page.eval(
+        `(() => {
+           document.getElementById('${pauseId}').pause();
+           document.getElementById('${playId}').play().catch(() => {});
+           return true;
+         })()`,
+      );
+      await sleep(500);
+    };
+
+    const captureWedge = async (clip) => {
       // Deliberately not using captureBeyondViewport: it forces a full-page
       // composite, which is slow on a page full of live video. The region was
       // scrolled into view above, so a plain clipped capture is enough.
@@ -912,49 +939,84 @@ async function main() {
       await sleep(2500); // let the loop push a curve and the adaptation settle
     };
 
-    await setStrength(0);
-    const pixelsOff = await captureWedge();
-    await setStrength(45); // the default: this is what most users ever see
-    const pixelsDefault = await captureWedge();
-    await setStrength(100);
-    const pixelsMax = await captureWedge();
-
     const report = (a, b) =>
       `black ${a.darkDecile.toFixed(3)}->${b.darkDecile.toFixed(3)}, ` +
       `shadow band ${a.shadowBand.toFixed(3)}->${b.shadowBand.toFixed(3)}, ` +
       `bright ${a.brightDecile.toFixed(3)}->${b.brightDecile.toFixed(3)}, ` +
       `mean ${a.mean.toFixed(3)}->${b.mean.toFixed(3)}`;
 
+    /* Full-range wedge: a normal scene must come down in level without losing
+       its blacks or its contrast. Two regressions are pinned here. The first
+       release lifted the blacks and greyed the whites of every scene, normal
+       ones included. The fix over-corrected: exposure stopped engaging on
+       anything short of a blazing frame, so an ordinary bright clip kept all of
+       its light output and lost only the top of its range — dimmer nowhere,
+       flatter at the top. */
+    const wedgeClip = await wedgeBoxFor('wedge');
+    await soloWedge('wedge', 'night-wedge');
+    await setStrength(0);
+    const wedgeOff = await captureWedge(wedgeClip);
+    await setStrength(45); // the default: this is what most users ever see
+    const wedgeDefault = await captureWedge(wedgeClip);
+    await setStrength(100);
+    const wedgeMax = await captureWedge(wedgeClip);
+
     check(
-      'rendered pixels at the DEFAULT strength: shadow detail lifted',
-      // Note: this test pattern is a full-range ramp, so it reads as a *bright*
-      // scene and the adaptive lift sits at its floor. A dark scene gets more.
-      pixelsDefault.shadowBand > pixelsOff.shadowBand * 1.3 &&
-        pixelsDefault.darkDecile > pixelsOff.darkDecile + 0.015,
-      report(pixelsOff, pixelsDefault),
+      'rendered pixels at the DEFAULT strength: normal scene keeps its blacks',
+      wedgeDefault.darkDecile < wedgeOff.darkDecile + 0.01 &&
+        wedgeDefault.shadowBand <= wedgeOff.shadowBand + 0.01,
+      report(wedgeOff, wedgeDefault),
     );
     check(
-      'rendered pixels at the DEFAULT strength: highlights pulled back',
-      pixelsDefault.brightDecile < pixelsOff.brightDecile - 0.02,
-      `p99 ${pixelsOff.p99.toFixed(3)} -> ${pixelsDefault.p99.toFixed(3)}`,
+      'rendered pixels at the DEFAULT strength: glare pulled back',
+      // The pattern carries a genuine pure-white patch, which is glare and does
+      // get softened even though the scene as a whole is normal.
+      wedgeDefault.brightDecile < wedgeOff.brightDecile - 0.02,
+      `p99 ${wedgeOff.p99.toFixed(3)} -> ${wedgeDefault.p99.toFixed(3)}`,
     );
     check(
-      'rendered pixels at maximum strength go further in both directions',
-      pixelsMax.shadowBand > pixelsDefault.shadowBand &&
-        pixelsMax.brightDecile < pixelsDefault.brightDecile,
-      report(pixelsDefault, pixelsMax),
+      'rendered pixels at the DEFAULT strength: a bright scene actually gets darker',
+      // The complaint this pins: the whole frame has to come down, not just its
+      // top decile. A full-range wedge is well over the light budget, so the
+      // exposure servo must engage on it.
+      wedgeDefault.mean < wedgeOff.mean - 0.04,
+      report(wedgeOff, wedgeDefault),
     );
     check(
-      'rendered pixels: image is not simply dimmed or blown out',
-      Math.abs(pixelsMax.mean - pixelsOff.mean) < 0.2 &&
-        Math.abs(pixelsDefault.mean - pixelsOff.mean) < 0.15,
-      `mean ${pixelsOff.mean.toFixed(3)} -> ${pixelsDefault.mean.toFixed(3)} -> ${pixelsMax.mean.toFixed(3)}`,
+      'rendered pixels: normal scene is dimmed further at maximum, never washed out',
+      wedgeMax.mean < wedgeDefault.mean &&
+        wedgeMax.brightDecile < wedgeDefault.brightDecile &&
+        wedgeMax.darkDecile < wedgeOff.darkDecile + 0.01,
+      report(wedgeDefault, wedgeMax),
+    );
+
+    /* Dark wedge: a night scene is where the lift belongs. */
+    const nightClip = await wedgeBoxFor('night-wedge');
+    await soloWedge('night-wedge', 'wedge');
+    await setStrength(0);
+    const nightOff = await captureWedge(nightClip);
+    await setStrength(45);
+    const nightDefault = await captureWedge(nightClip);
+    await setStrength(100);
+    const nightMax = await captureWedge(nightClip);
+
+    check(
+      'rendered pixels at the DEFAULT strength: dark scene shadows lifted',
+      nightDefault.shadowBand > nightOff.shadowBand * 1.3 &&
+        nightDefault.darkDecile > nightOff.darkDecile + 0.015,
+      report(nightOff, nightDefault),
+    );
+    check(
+      'rendered pixels at maximum strength lift the dark scene further',
+      nightMax.shadowBand > nightDefault.shadowBand,
+      report(nightDefault, nightMax),
     );
 
     /* -------- flash guard, observed live at the default strength -------- */
     await page.eval(
       `(() => {
-         document.getElementById('wedge').pause();      // hand primary back to the animated clip
+         document.getElementById('wedge').pause();       // hand primary back to the animated clip
+         document.getElementById('night-wedge').pause();
          document.getElementById('play-video').click();
          return true;
        })()`,

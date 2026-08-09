@@ -66,7 +66,7 @@ export function videoEffect(strength: number): VideoEffect {
   const params = mapVideoStrength(strength);
   if (params.bypass) return { bypass: true, shadowGain: 1, whiteDrop: 0 };
 
-  const bounds = adaptBounds();
+  const bounds = adaptBounds(params);
   const lifted = buildToneCurve(params, bounds.dark, 65);
   const rolled = buildToneCurve(params, bounds.bright, 65);
   return {

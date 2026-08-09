@@ -128,6 +128,11 @@ const size = await page.send('Runtime.evaluate', {
      const keys = document.getElementById('shortcut-keys');
      return JSON.stringify({
        w: app.offsetWidth,
+       // The app column has a fixed width, so its own measurement can never
+       // reveal a stretched popup. Chrome sizes the popup from the document, so
+       // that is what has to be watched: it once rendered at the 800 px cap with
+       // the column stranded on the left, and this measurement was blind to it.
+       docWidth: document.documentElement.getBoundingClientRect().width,
        h,
        withSite,
        shortcutShown: !document.getElementById('shortcut').hidden,
@@ -136,11 +141,17 @@ const size = await page.send('Runtime.evaluate', {
    })()`,
   returnByValue: true,
 });
-const { w, h, withSite, shortcutShown, shortcutKeys } = JSON.parse(size.result.value);
+const { w, h, docWidth, withSite, shortcutShown, shortcutKeys } = JSON.parse(size.result.value);
 const verdict = withSite > 600 ? `OVER the 600 cap by ${withSite - 600}` : 'fits the 600 cap';
 console.log(
   `strength ${strength}: popup is ${w} x ${h} CSS px ` +
     `(${withSite} with the per-site button) — ${verdict}`,
+);
+console.log(
+  docWidth > w
+    ? `WIDTH REGRESSION: the document is ${docWidth} px against a ${w} px column, ` +
+        `so Chrome will render the popup stretched`
+    : `document width ${docWidth} px matches the ${w} px column`,
 );
 console.log(`shortcut hint: ${shortcutShown ? `shown, keys=${shortcutKeys}` : 'hidden'}`);
 

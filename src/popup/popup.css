@@ -17,6 +17,9 @@
   --idle: #4d5871;
   --focus: #8fb4ff;
   --radius: 10px;
+  /* The popup's one true width. Used by the document and the column alike, so
+     the two cannot drift and leave a gap Chrome will happily fill. */
+  --app-width: 330px;
 }
 
 * {
@@ -35,10 +38,21 @@
   display: none !important;
 }
 
+/*
+ * The width is stated on the document, not just on the column inside it.
+ *
+ * Chrome auto-sizes a popup from the renderer's preferred width and clamps it to
+ * 800 px. If the document is free to be wider than its content — which is what a
+ * viewport meta tag, or simply a block-level body, invites — the popup can come
+ * back at the cap with the column stranded against the left edge. Pinning the
+ * document leaves nothing for Chrome to stretch.
+ */
 html,
 body {
+  width: var(--app-width);
   margin: 0;
   padding: 0;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
   font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -51,7 +65,7 @@ body {
  * the per-site button when it appears, without a scrollbar.
  */
 .app {
-  width: 330px;
+  width: var(--app-width);
   padding: 10px;
   display: flex;
   flex-direction: column;

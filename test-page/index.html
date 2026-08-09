@@ -142,20 +142,31 @@
     <div id="slot2" class="pair"></div>
     <div id="log" role="status" aria-live="polite"></div>
 
-    <h2>4. Static test pattern (for pixel comparisons)</h2>
+    <h2>4. Static test patterns (for pixel comparisons)</h2>
     <p>
-      A fixed grey ramp, so you can compare the same frame with and without
-      processing. Toggle the extension and watch the dark end of the ramp
-      separate while the white end pulls back. The automated smoke test measures
-      exactly this by screenshotting the element.
+      Two fixed grey ramps, so you can compare the same frame with and without
+      processing. The full-range ramp reads as a normal scene and should stay
+      essentially untouched apart from its glare pulling back; the dark ramp
+      reads as a night scene and its shadow steps should separate. The automated
+      smoke test measures exactly this by screenshotting the elements.
     </p>
     <div class="pair">
       <figure>
         <video id="wedge" playsinline muted></video>
-        <figcaption>&lt;video&gt; — processed</figcaption>
+        <figcaption>&lt;video&gt; full-range — processed</figcaption>
       </figure>
       <figure>
         <canvas id="wedge-source" width="480" height="270"></canvas>
+        <figcaption>&lt;canvas&gt; source — reference</figcaption>
+      </figure>
+    </div>
+    <div class="pair">
+      <figure>
+        <video id="night-wedge" playsinline muted></video>
+        <figcaption>&lt;video&gt; dark — processed</figcaption>
+      </figure>
+      <figure>
+        <canvas id="night-wedge-source" width="480" height="270"></canvas>
         <figcaption>&lt;canvas&gt; source — reference</figcaption>
       </figure>
     </div>
