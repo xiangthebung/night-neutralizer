@@ -19,7 +19,7 @@ npm run smoke    # end-to-end in headless Chrome
 | --- | --- |
 | `tests/strength.test.ts` | strength → processing parameters: true bypass at 0, clamping and non-finite input, monotonicity across all 101 values, release lengthening with strength, **make-up gain that accounts for Chromium's own internal make-up** and keeps the modelled peak below full scale at every strength, **a bounded safety stage always present**, quiet boosted more than loud with the range never inverting, every value inside the Web Audio legal range, no discontinuity next to bypass |
 | `tests/soft-clip.test.ts` | safety clipper: exact identity below the knee, never exceeding the ceiling for input up to 50× full scale, monotonic and symmetric, less than 1 dB cost to a full-scale signal, decreasing slope, curve sampling (odd length, exact zero, identity samples on the identity line), identity params producing a straight line |
-| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **scene gating: a scene inside the light budget converges on the identity, a normally exposed scene over it is dimmed by a clean scale (blacks stay black, saturation untouched, every ratio below the shoulder preserved), ordinary true blacks do not count as crushed shadows, and a bright scene is dimmed without being lifted**, **linear-light measurement reading emitted light rather than how dark a frame looks, and percentiles surviving histogram normalisation**, **a bright scene inside a dark frame: not mistaken for a night scene, and its light output really coming down rather than only its top decile**, **slope allocation: more contrast where the scene lives, endpoints unmoved, monotonic and bounded on every scene and strength, capped so a flat region cannot claim slope for its own noise, disengaged entirely when the curve is giving nothing up, and time-smoothed so the LUT cannot pump**, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, CSS fallback shape |
+| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **scene gating: a scene inside the light budget converges on the identity, a normally exposed scene over it is dimmed by a clean scale (blacks stay black, saturation untouched, every ratio below the shoulder preserved), ordinary true blacks do not count as crushed shadows, and a bright scene is dimmed without being lifted**, **linear-light measurement reading emitted light rather than how dark a frame looks, and percentiles surviving histogram normalisation**, **a bright scene inside a dark frame: not mistaken for a night scene, and its light output really coming down rather than only its top decile**, **slope allocation: more contrast where the scene lives, endpoints unmoved, monotonic and bounded on every scene and strength, capped so a flat region cannot claim slope for its own noise, disengaged entirely when the curve is giving nothing up, and time-smoothed so the LUT cannot pump**, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, **scene-change snapping: the whole state landing on its target on the frame of the cut in both directions, the response reaching its dimmest at the cut and only recovering from there, no snap on motion within a scene, no snap on a flat-frame fade (where every pixel changes bin), a hard cut snapping at 60/30/8 Hz, the mean-only fallback never over-triggering, and the flash guard left at full strength when the servo is already pinned at minExposure**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers on continuous change, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, CSS fallback shape |
 | `tests/media-registry.test.ts` | discovery before and after start, dynamic insertion, **duplicate prevention** (re-attach, rescan, DOM move), open shadow roots (and closed ones ignored), removal only after the grace period, re-parented elements surviving, subtree removal, element swap, mutation-storm rescan, throwing handlers, `stop()`/`release()`, idempotent `start()` |
 | `tests/settings.test.ts` | sanitisation of missing/garbage/hostile values, clamping and rounding, unknown keys dropped, save→load round-trip through a fresh store, storage failure falling back to defaults, `ensureDefaults` writing only once, reset, change notifications, ignoring other areas/keys, unsubscribe not leaking listeners, **migration of pre-split settings** (the old single `strength` mirrored into both channels), exclusion-list cleaning, **the default exclusion array never being shared with stored settings**, effective strength with the link on and off |
 | `tests/site.test.ts` | hostname normalisation (case, `www.`, ports, credentials, trailing dots, IPv6 literals, full URLs, opaque origins), **site keys derived from `location.ancestorOrigins`** so an embedded player is governed by the page it is embedded in, subdomain coverage without matching lookalike hosts (`example.com` covers `news.example.com` but not `notexample.com`), a stray empty entry not disabling the whole web, add/remove including collapsing subdomains under a newly added parent and removing a covering parent when a subdomain is re-enabled, list capping |
@@ -64,9 +64,13 @@ The checks:
   decoded with a small PNG reader in the test, so this measures what the
   compositor actually painted, and the **default** strength is asserted, not just
   the maximum;
-- **the flash guard**: a hard scene cut moves the white point in a single step
-  (~0.12), and a controlled 250 ms white flash on the static pattern takes the
-  encoded white level 0.819 → 0.741 and then releases back to 0.819;
+- **the flash guard and the cut snap**: a hard scene cut moves the white point
+  in a single step (0.286, up from 0.202 before the adaptation snapped at a
+  cut), and a controlled 250 ms white flash on the static pattern takes the
+  encoded white level 0.714 → 0.533 and then releases back to 0.714. The flash
+  figure is the one that pins the guard's damping: the servo is already at
+  `minExposure` on that pattern, so the snap contributes nothing there and the
+  guard must not be scaled back;
 - one luminance sample costs well under a millisecond, and running the analysis
   at frame rate costs a few percent of one core (measured via
   `Performance.getMetrics` with processing off vs on);
@@ -162,10 +166,15 @@ extension only processes `<video>`, so the canvas is your unprocessed reference.
 1. Strength 45, video on. Compare the two during the *night interior* phase: the
    dark bars and the low end of the step wedge should be visibly separated in the
    video and still crushed in the canvas.
-2. Wait for the cut to *bright snow*. The video's sky should be noticeably less
-   glaring, and it should settle within roughly half a second (fast dimming).
-3. Watch the fade back to night: brightness should recover slowly and smoothly,
-   with no visible pumping or stepping.
+2. Wait for the cut to *bright snow*. The video's sky should be less glaring
+   **on the first frame you can see**, not half a second later: the adaptation
+   snaps at a detected cut rather than easing in. What you are looking for is
+   the absence of a visible settle, which is easiest to catch by watching the
+   canvas and the video side by side across the cut.
+3. Watch the fade back to night: this one is a *fade*, not a cut, so it must not
+   snap. Brightness should recover slowly and smoothly, with no pumping, no
+   stepping, and no sudden jump partway through the fade — a snap here would
+   mean the cut detector is reading a gradual change as a scene change.
 4. Watch the single-frame **FLASH**. It should be clearly softer in the video
    than in the canvas. The guard is reactive, so a one-frame flash is shortened
    rather than removed; the cut into the snow scene at t=3 s shows the effect

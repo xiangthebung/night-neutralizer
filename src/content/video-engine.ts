@@ -5,7 +5,8 @@
  *   1. pick the "primary" video: the largest visible, playing one;
  *   2. draw it into a 48x27 offscreen canvas and read the pixels back;
  *   3. summarise luminance (mean / p10 / p90 / p99.5);
- *   4. advance the adaptation state (asymmetric smoothing + flash guard);
+ *   4. advance the adaptation state (asymmetric smoothing, snapping on a cut,
+ *      plus the flash guard);
  *   5. rebuild the 33-entry tone curve and push it into the SVG filter.
  *
  * The measurement is deliberately tiny: a 48x27 read-back costs well under a
@@ -324,9 +325,10 @@ export class VideoEngine {
     const previousFlash = this.state.flash;
     this.state = updateAdaptState(this.state, result.stats, this.params, dt);
     this.setMode('adaptive');
-    // A rising flash must reach the screen on the very next frame, so it
-    // bypasses the push throttle.
-    this.pushCurve(this.state.flash > previousFlash + 0.01);
+    // A scene change and a rising flash both have to reach the screen on the
+    // very next frame, so both bypass the push throttle. Throttling a snap
+    // would put back most of the delay the snap exists to remove.
+    this.pushCurve(this.state.cut > 0 || this.state.flash > previousFlash + 0.01);
     this.tuneStride();
     return true;
   }

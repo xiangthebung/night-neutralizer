@@ -4,6 +4,57 @@ Notable changes per release. Dates are release dates; the format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely and versions
 follow [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **The tone curve now snaps at a scene change instead of easing into it.** The
+  measurement was never the slow part — frames are analysed on
+  `requestVideoFrameCallback`, one frame after presentation — but the adaptation
+  then eased onto the new scene with time constants of 0.3 s (dimming), 0.8 s
+  (highlight shoulder), 1.2 s (shadow lift), 1.6 s (recovery) and 0.5 s
+  (histogram). Two tenths of a second after a cut, the exposure servo was under
+  halfway there and the shadow lift about 15% of the way, which is what the lag
+  was: the new scene arrived and the correction visibly followed it in.
+
+  Easing exists to hide a correction inside content that is already moving. A
+  cut both masks anything changed on the same frame and leaves nothing to hide a
+  slow correction in, so it is the one moment where easing is all cost. The
+  state is now eased and snapped in the same expression, blended by a 0..1 `cut`
+  amount, and the resulting curve bypasses the LUT push throttle. The first
+  analysed frame is a full cut by definition, which is where the old first-frame
+  special case went.
+
+- **Cut detection is the earth-mover distance between successive frame
+  histograms**, which the measurement already produces, so it costs 64 adds per
+  analysed frame — nothing next to the 48×27 read-back that produced them.
+  Measured cost is unchanged: 0.011 ms per sample, 2.6–2.9% of one core over a
+  5 s window, both before and after.
+
+  Distance travelled rather than bin-by-bin difference, because a low-contrast
+  frame keeps nearly all of its mass in one bin and a slow dissolve relocates
+  all of it on every bin crossing — a difference metric reads that as "the whole
+  frame changed" and snaps repeatedly through a two-second fade. The gates
+  mirror the flash guard's: a magnitude floor (0.08–0.22 luma) and a rate gate
+  (1.5–4.0 luma/s), both smoothstepped, so the behaviour does not depend on
+  whether we are sampling at 60 Hz or on the 8 Hz timer fallback. Frames without
+  a histogram fall back to |Δmean|, a strict lower bound on the transport
+  distance, so that path can only under-detect a cut and never invent one.
+
+- **The flash guard is scaled back on a cut by however much the snap actually
+  covered**, rather than by the bare presence of one. It had been doing two jobs
+  — covering the exposure servo's lag and blunting the transient — and snapping
+  only does the first, so stacking the whole guard on an already-correct
+  exposure over-dims. But on content already pinned at `minExposure` the servo
+  has no room to move, the snap contributes nothing, and the guard is the only
+  transient protection there is. Damping on the cut alone measured the white
+  flash at 0.533 → 0.639, weakening the response in exactly the case the guard
+  exists for; scaling by the servo's actual contribution holds it at 0.533.
+
+  Measured on the animated smoke clip, the largest single-step white-point drop
+  over one scene cycle goes 0.2022 → 0.2863, and the controlled white flash is
+  unchanged at 0.714 → 0.533.
+
 ## [1.0.0] - 2026-08-09
 
 First public release: adaptive video tone mapping via an SVG LUT applied by the

@@ -585,7 +585,37 @@ Each measurement:
   scene: dark scenes get opened up, scenes over the light budget get held back,
   and a scene inside it converges on the identity curve instead of being
   flattened,
+- **snaps instead of easing at a scene change**, see below,
 - rebuilds the LUT and writes it to the filter, but only if it changed.
+
+**Cuts snap.** Those time constants are right for continuous footage and wrong
+at a cut. Easing exists to hide a correction inside content that is already
+moving; a cut both masks anything changed on the same frame *and* leaves nothing
+to hide a slow correction in, so easing there is visible as the picture drifting
+for up to 1.6 s after the new scene arrives. The state is therefore eased and
+snapped in the same expression: a 0..1 `cut` amount blends between the eased
+value and the target, and the resulting curve bypasses the push throttle.
+
+`cut` comes from how far the frame's luminance distribution *travelled* since
+the last analysed frame — the 1-D earth-mover distance between the two 64-bin
+histograms, which the measurement already computes, so the detector costs 64
+adds. Distance travelled rather than bin-by-bin difference, because a
+low-contrast frame (fog, a title card, a night interior) holds nearly all of its
+mass in one bin, and a slow dissolve relocates *all* of it every time the level
+crosses a bin boundary: a difference metric reads that as "the whole frame
+changed" and would snap several times a second through a two-second fade.
+Transport distance reads the same event as one bin width, 0.016.
+
+The gates mirror the flash guard's: a magnitude floor (0.08–0.22 luma, below
+which the curve's target barely moves and snapping is indistinguishable from
+easing) and a rate gate (1.5–4.0 luma/second, so a deliberate fade is judged by
+how fast the content moves rather than by how often we sample). Both are
+smoothstepped, so no two near-identical frames land either side of a cliff. At
+60 Hz the magnitude floor binds; the rate gate is what keeps the 8 Hz timer
+fallback honest, where a cut and a fast pan genuinely are not distinguishable.
+Where frames carry no histogram the detector falls back to |Δmean|, which is a
+strict lower bound on the transport distance — it can only under-detect a cut,
+never invent one.
 
 A 250 ms timer handles upkeep only (our nodes, the primary choice, fullscreen).
 Frame skipping keeps the cost bounded: if a read-back measures above 1.2 ms the
@@ -600,14 +630,25 @@ per-sample delta, so it means the same thing whether we are sampling at 60 Hz or
 white point down (a further 0.45 × the flash amount), then decays with τ =
 0.55 s. Both parts matter: exposure alone gets damped by the shoulder exactly
 where the glare is. Measured on a controlled white flash at the default
-strength, the encoded white level goes 0.842 → 0.744 and back.
+strength, the encoded white level goes 0.714 → 0.533 and back.
 
-Its honest limit: this is a *reactive* guard. It measures a frame that has
-already been presented, so the dim lands on the following frame (~16 ms at
-60 fps) and the first frame of a flash is not attenuated. There is no frame
-lookahead available to an extension, so pre-emption is not possible. What it can
-do — and does — is stop a bright cut or a multi-frame strobe from staying
-painful.
+The guard was doing two jobs: covering the exposure servo's lag, and blunting
+the transient. Snapping does the first one, so where a cut has been detected the
+guard is scaled back to avoid double-counting — but only in proportion to how
+much dimming the snap actually delivered. On content already pinned at
+`minExposure` the servo has no room left to move, so the guard stays at full
+strength, because it is then the only transient protection the frame has. That
+is not a hypothetical: damping on the bare presence of a cut measured 0.533 →
+0.639 on the white-flash test, which is precisely the case the guard exists for.
+
+Its honest limit — shared with the cut snapping — is that this is *reactive*. It
+measures a frame that has already been presented, so the response lands on the
+following frame (~16 ms at 60 fps) and the first frame of a cut or a flash wears
+the old curve. There is no frame lookahead available to an extension, so
+pre-emption is not possible, and where the engine has backed off to every 4th or
+8th frame to stay inside its CPU budget the detection latency scales with it.
+What it can do — and does — is stop a bright cut or a multi-frame strobe from
+staying painful.
 
 The popup reports `adaptive` only when frames are really being measured. If they
 cannot be read, it says **fixed night curve** and the applied curve is a static,
@@ -622,8 +663,8 @@ filter as adaptive.
 
 - **The effect itself costs no per-frame JavaScript.** The LUT is applied by the
   compositor. A curve update is one attribute write, throttled to ~33/s and
-  skipped when the curve is unchanged (a rising flash bypasses the throttle so
-  it lands on the next frame).
+  skipped when the curve is unchanged (a scene change and a rising flash both
+  bypass the throttle so they land on the next frame).
 - **Measurement** is one 48×27 `drawImage` + `getImageData` per sampled frame,
   measured at **0.013 ms per sample** on the synthetic 640×360 test clip in
   headless Chrome. End to end, running the analysis at frame rate cost

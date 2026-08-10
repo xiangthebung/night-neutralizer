@@ -3,6 +3,7 @@ import {
   COMFORT_LIGHT,
   DARK_LIFT_FLOOR,
   DARK_ROLL_FLOOR,
+  FLASH_CUT_RESIDUAL,
   HIST_BINS,
   adaptBounds,
   applyCurve,
@@ -12,6 +13,7 @@ import {
   cssApproxFilter,
   curveToTableValues,
   resolveCurve,
+  sceneShift,
   slopeWeights,
   solveKneeScale,
   staticAdaptState,
@@ -236,17 +238,20 @@ describe('updateAdaptState', () => {
   });
 
   it('dims faster than it recovers', () => {
-    let state = updateAdaptState(createAdaptState(), stats(0.3), params, 0.125);
-    const dimming = updateAdaptState(state, stats(0.9), params, 0.125);
-    const dropIn1Tick = state.exposure - dimming.exposure;
+    // The asymmetry governs *continuous* change; a cut snaps in both directions
+    // (see the scene-change suite). So drive both directions from the same
+    // distance to the same target, with the scene held still so nothing snaps.
+    let settled = createAdaptState();
+    for (let i = 0; i < 40; i++) settled = updateAdaptState(settled, stats(0.9), params, 0.125);
+    const target = settled.exposure;
+    const gap = 0.2;
 
-    state = dimming;
-    for (let i = 0; i < 12; i++) state = updateAdaptState(state, stats(0.9), params, 0.125);
-    const settled = state.exposure;
-    const recovering = updateAdaptState(state, stats(0.2), params, 0.125);
-    const riseIn1Tick = recovering.exposure - settled;
+    const dimming = updateAdaptState({ ...settled, exposure: target + gap }, stats(0.9), params, 0.125);
+    const recovering = updateAdaptState({ ...settled, exposure: target - gap }, stats(0.9), params, 0.125);
+    expect(dimming.cut).toBe(0);
+    expect(recovering.cut).toBe(0);
 
-    expect(dropIn1Tick).toBeGreaterThan(riseIn1Tick);
+    expect(target + gap - dimming.exposure).toBeGreaterThan(recovering.exposure - (target - gap));
   });
 
   it('detects a hard cut at any sampling rate, and a fade at none', () => {
@@ -261,8 +266,15 @@ describe('updateAdaptState', () => {
     };
 
     for (const dt of [1 / 60, 1 / 30, 0.125]) {
-      const cut = updateAdaptState(settle(dt), stats(0.92), params, dt);
-      expect(cut.flash).toBeGreaterThan(0.5);
+      const before = settle(dt);
+      const cut = updateAdaptState(before, stats(0.92), params, dt);
+      // The guard fires, damped by the snap that now handles the servo's lag...
+      expect(cut.flash).toBeGreaterThan(0.2);
+      // ...and what the viewer actually gets is a picture that is already much
+      // dimmer on this very frame, rather than dimTau later.
+      expect(resolveCurve(params, cut).exposure).toBeLessThan(
+        resolveCurve(params, before).exposure * 0.8,
+      );
     }
 
     // A deliberate 2 s fade from 0.12 to 0.92 must never trip the guard,
@@ -284,11 +296,17 @@ describe('updateAdaptState', () => {
     const large = updateAdaptState(base, stats(0.9), params, 1 / 60);
     expect(small.flash).toBeGreaterThan(0);
     expect(small.flash).toBeLessThan(0.5);
-    expect(large.flash).toBeGreaterThan(0.9);
+    // The guard alone no longer carries the whole response to a big jump — the
+    // snap does most of it — so the ordering is on the rendered result.
+    expect(large.flash).toBeGreaterThan(small.flash);
+    expect(resolveCurve(params, large).exposure).toBeLessThan(
+      resolveCurve(params, small).exposure * 0.9,
+    );
 
     // ...and a tiny wobble is ignored entirely.
     const wobble = updateAdaptState(base, stats(0.24), params, 1 / 60);
     expect(wobble.flash).toBe(0);
+    expect(wobble.cut).toBe(0);
   });
 
   it('dims the rendered white level meaningfully when a flash fires', () => {
@@ -498,6 +516,23 @@ const NIGHT: Array<[number, number]> = [
   [0.25, 0.15],
   [0.6, 0.05],
 ];
+// The same night scene with light moving around inside it. A large share of the
+// frame changes bin, but only to a neighbouring level: motion, not a cut.
+const NIGHT_SHUFFLED: Array<[number, number]> = [
+  [0.03, 0.2],
+  [0.12, 0.6],
+  [0.25, 0.15],
+  [0.6, 0.05],
+];
+
+/** Bin-by-bin distance between two histograms; 0 when they are identical. */
+function histL1(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  let total = 0;
+  for (let bin = 0; bin < HIST_BINS; bin++) {
+    total += Math.abs((a[bin] as number) - (b[bin] as number));
+  }
+  return total;
+}
 
 describe('linear-light measurement', () => {
   it('reads emitted light, not how dark the frame looks', () => {
@@ -667,21 +702,180 @@ describe('slope allocation', () => {
   });
 
   it('smooths the histogram over time so the curve cannot pump', () => {
+    // Light moving around *within* a scene: the histogram may only follow a
+    // fraction of the way per frame, or the LUT jumps on every noisy frame.
+    // (A cut is the other case, and deliberately snaps — see below.)
     const params = mapVideoStrength(45);
+    const scene = computeSceneStats(sceneFrame(NIGHT));
+    const shuffled = computeSceneStats(sceneFrame(NIGHT_SHUFFLED));
     let state = createAdaptState();
+    for (let i = 0; i < 60; i++) state = updateAdaptState(state, scene, params, 1 / 30);
+
+    const before = state.histogram as Float32Array;
+    const next = updateAdaptState(state, shuffled, params, 1 / 30);
+    expect(next.cut).toBe(0);
+
+    const available = histL1(before, shuffled.histogram as Float32Array);
+    const moved = histL1(before, next.histogram as Float32Array);
+    expect(moved).toBeGreaterThan(0);
+    expect(moved).toBeLessThan(available * 0.2);
+  });
+
+  it('snaps the histogram on a cut, so the slope allocation is not half a scene behind', () => {
+    const params = mapVideoStrength(45);
     const dark = computeSceneStats(sceneFrame(NIGHT));
     const bright = computeSceneStats(sceneFrame(DASHCAM));
+    let state = createAdaptState();
     for (let i = 0; i < 60; i++) state = updateAdaptState(state, dark, params, 1 / 30);
-    const before = state.histogram as Float32Array;
-    const next = updateAdaptState(state, bright, params, 1 / 30).histogram as Float32Array;
-    // One frame of a completely different scene may only move the histogram a
-    // fraction of the way, or the LUT would jump on every noisy frame.
-    let moved = 0;
-    for (let bin = 0; bin < HIST_BINS; bin++) {
-      moved += Math.abs((next[bin] as number) - (before[bin] as number));
+
+    const next = updateAdaptState(state, bright, params, 1 / 30);
+    expect(next.cut).toBe(1);
+    expect(histL1(next.histogram as Float32Array, bright.histogram as Float32Array)).toBeCloseTo(
+      0,
+      6,
+    );
+  });
+});
+
+describe('scene-change snapping', () => {
+  // The taus exist to hide a correction inside continuous motion. At a cut
+  // there is nothing to hide it in and nothing that needs hiding, because the
+  // cut masks anything done on the same frame — while easing there is visible
+  // as the picture drifting for up to recoverTau after the scene arrives.
+  const p = mapVideoStrength(45);
+  const night = computeSceneStats(sceneFrame(NIGHT));
+  const dashcam = computeSceneStats(sceneFrame(DASHCAM));
+  const flat = (luma: number) => computeSceneStats(flatFrame(luma, 1296));
+
+  const hold = (scene: SceneStats, dt = 1 / 60, seconds = 4) => {
+    let state = createAdaptState();
+    for (let i = 0; i < Math.round(seconds / dt); i++) state = updateAdaptState(state, scene, p, dt);
+    return state;
+  };
+
+  it('lands the whole state on its target on the frame of the cut', () => {
+    const before = hold(night);
+    const after = updateAdaptState(before, dashcam, p, 1 / 60);
+    expect(after.cut).toBe(1);
+
+    // One frame in, the state is exactly where four seconds of easing puts it.
+    const settled = hold(dashcam);
+    expect(after.exposure).toBeCloseTo(settled.exposure, 10);
+    expect(after.liftScale).toBeCloseTo(settled.liftScale, 10);
+    expect(after.rollScale).toBeCloseTo(settled.rollScale, 10);
+    // ...and it really did move; the two scenes are not accidentally alike.
+    expect(Math.abs(after.exposure - before.exposure)).toBeGreaterThan(0.1);
+  });
+
+  it('opens a dark scene immediately on a cut out of a bright one', () => {
+    // recoverTau is 1.6 s and the lift tau 1.2 s, so this direction was the
+    // worse of the two: a cut from daylight to a night interior spent over a
+    // second both over-dimmed and under-lifted.
+    const before = hold(dashcam);
+    const after = updateAdaptState(before, night, p, 1 / 60);
+    const settled = hold(night);
+    expect(after.exposure).toBeCloseTo(settled.exposure, 10);
+    expect(after.liftScale).toBeCloseTo(settled.liftScale, 10);
+    expect(after.liftScale).toBeGreaterThan(before.liftScale + 0.3);
+  });
+
+  it('reaches its dimmest at the cut and only recovers from there', () => {
+    // The user-visible point of the whole exercise: no delayed dip. Before, the
+    // servo eased down over dimTau while the flash guard covered the gap, so
+    // the darkest frame arrived a few hundred ms *after* the cut.
+    let state = hold(night);
+    const trace: number[] = [];
+    for (let i = 0; i < 120; i++) {
+      state = updateAdaptState(state, flat(0.98), p, 1 / 60);
+      trace.push(resolveCurve(p, state).exposure);
     }
-    expect(moved).toBeGreaterThan(0);
-    expect(moved).toBeLessThan(0.4);
+    expect(trace[0] as number).toBeCloseTo(Math.min(...trace), 10);
+    for (let i = 1; i < trace.length; i++) {
+      expect(trace[i] as number).toBeGreaterThanOrEqual((trace[i - 1] as number) - 1e-9);
+    }
+  });
+
+  it('damps the flash guard by however much the snap already covered', () => {
+    // The guard had two jobs: cover the servo's lag and blunt the transient. On
+    // a snap the first is gone, so it is scaled back rather than stacked on top
+    // of an already-correct exposure.
+    const after = updateAdaptState(hold(night), flat(0.98), p, 1 / 60);
+    expect(after.cut).toBe(1);
+    expect(after.flash).toBeGreaterThan(0);
+    expect(after.flash).toBeLessThanOrEqual(FLASH_CUT_RESIDUAL);
+    // The combined response stays close to where the new scene settles, instead
+    // of punching well past it and crawling back.
+    const settled = resolveCurve(p, hold(flat(0.98))).exposure;
+    expect(resolveCurve(p, after).exposure).toBeGreaterThan(settled * 0.7);
+  });
+
+  it('leaves the flash guard alone when the servo has no room to snap', () => {
+    // Content already pinned at minExposure — a bright test pattern, a daylight
+    // scene — cannot be dimmed any further by the servo, so the guard is the
+    // only transient protection it has. Damping on the bare presence of a cut
+    // removed most of the response to a white flash over exactly that content.
+    const before = hold(flat(0.6));
+    expect(before.exposure).toBeCloseTo(p.adapt.minExposure, 6);
+
+    const pinned = updateAdaptState(before, flat(1), p, 1 / 60);
+    expect(pinned.cut).toBe(1);
+    expect(pinned.flash).toBeGreaterThan(0.9);
+
+    // The identical transition, from a state where the servo *does* have room:
+    // same jump, same guard magnitude, but now the snap covers it.
+    const withRoom = updateAdaptState({ ...before, exposure: 1 }, flat(1), p, 1 / 60);
+    expect(withRoom.flash).toBeLessThan(pinned.flash * 0.6);
+  });
+
+  it('does not snap on motion within a scene', () => {
+    const after = updateAdaptState(hold(night), computeSceneStats(sceneFrame(NIGHT_SHUFFLED)), p, 1 / 60);
+    expect(after.cut).toBe(0);
+  });
+
+  it('treats a flat-frame fade as motion even though every pixel changes bin', () => {
+    // The case that rules out a bin-by-bin difference metric. A low-contrast
+    // frame holds all its mass in one bin, so a slow fade relocates 100% of it
+    // on every bin crossing. Measuring how *far* the mass moved reads the same
+    // event as one bin width, which is what it is.
+    for (const dt of [1 / 60, 1 / 30, 0.125]) {
+      let state = hold(flat(0.1), dt, 1);
+      const steps = Math.round(2 / dt);
+      for (let i = 1; i <= steps; i++) {
+        state = updateAdaptState(state, flat(0.1 + (0.8 * i) / steps), p, dt);
+        expect(state.cut).toBe(0);
+      }
+    }
+  });
+
+  it('snaps a hard cut at every sampling rate, including the 8 Hz fallback', () => {
+    for (const dt of [1 / 60, 1 / 30, 0.125]) {
+      const after = updateAdaptState(hold(flat(0.1), dt, 1), flat(0.9), p, dt);
+      expect(after.cut).toBe(1);
+    }
+  });
+
+  it('falls back to the mean when frames carry no histogram, and cannot over-trigger', () => {
+    // |Δmean| is a strict lower bound on the transport distance, so a caller
+    // with only a coarse summary detects fewer cuts, never phantom ones.
+    const meanDelta = dashcam.mean - night.mean;
+    expect(sceneShift(dashcam.histogram, night.histogram, meanDelta)).toBeGreaterThanOrEqual(
+      Math.abs(meanDelta) - 1e-12,
+    );
+    expect(sceneShift(undefined, undefined, meanDelta)).toBeCloseTo(Math.abs(meanDelta), 12);
+
+    // Stripped of histograms, the same pair still reads as a cut.
+    const strip = (s: SceneStats): SceneStats => ({ ...s, histogram: undefined });
+    let state = createAdaptState();
+    for (let i = 0; i < 60; i++) state = updateAdaptState(state, strip(night), p, 1 / 60);
+    expect(updateAdaptState(state, strip(dashcam), p, 1 / 60).cut).toBe(1);
+  });
+
+  it('reports no cut once a scene is running, so the curve push stays throttled', () => {
+    let state = hold(night);
+    for (let i = 0; i < 30; i++) {
+      state = updateAdaptState(state, night, p, 1 / 60);
+      expect(state.cut).toBe(0);
+    }
   });
 });
 

@@ -84,6 +84,19 @@ export interface AdaptState {
    * because a curve rebuilt from raw per-frame statistics visibly pumps.
    */
   histogram?: Float32Array | null;
+  /**
+   * The *raw* histogram of the previous analysed frame, kept only so the next
+   * one can measure how far the scene moved. Deliberately not the smoothed
+   * `histogram`: that one lags by design, and comparing against a lagged
+   * reference turns half a second of ordinary motion into an apparent cut.
+   */
+  prevHistogram?: Float32Array | null;
+  /**
+   * How much of the last step was treated as a scene change rather than as
+   * continuous motion, 0..1. At 1 the state snapped straight onto its targets.
+   * Exposed so the render loop can push the resulting curve immediately.
+   */
+  cut: number;
 }
 
 export function createAdaptState(): AdaptState {
@@ -97,6 +110,8 @@ export function createAdaptState(): AdaptState {
     prevMean: 0,
     initialized: false,
     histogram: null,
+    prevHistogram: null,
+    cut: 0,
   };
 }
 
@@ -114,6 +129,8 @@ export function staticAdaptState(params: VideoParams): AdaptState {
     prevMean: 0,
     initialized: true,
     histogram: null,
+    prevHistogram: null,
+    cut: 0,
   };
 }
 
@@ -192,9 +209,106 @@ const GLARE_FULL = 0.95;
 /** Time constant (s) for smoothing the frame histogram. */
 const HIST_TAU = 0.5;
 
+/**
+ * Time constants (s) for the shadow lift and the highlight shoulder. Slower
+ * than the exposure servo on purpose: these change the *shape* of the curve,
+ * and a shape change is more visible than a level change.
+ */
+const LIFT_TAU = 1.2;
+const ROLL_TAU = 0.8;
+
+/**
+ * Scene-change detection.
+ *
+ * `sceneShift` measures how far the frame's luminance distribution *travelled*
+ * since the last analysed frame, in luma units. The thresholds below are then
+ * the same shape as the flash guard's: a magnitude floor, because a cut between
+ * two similarly lit shots moves the curve's target so little that snapping and
+ * easing are indistinguishable, and a rate gate, because a deliberate fade
+ * travels the same distance at a rate that is a property of the content rather
+ * than of how often we happen to sample.
+ *
+ * At 60 Hz the magnitude floor is the binding one (0.08 luma in a 16 ms step is
+ * already 4.8 luma/s of continuous change, which nothing shot by a human does).
+ * The rate gate is what keeps the 8 Hz timer fallback honest: at that interval a
+ * cut and a fast pan genuinely are not distinguishable, so only large, fast
+ * moves get any snap credit at all.
+ */
+export const CUT_MIN_SHIFT = 0.08;
+export const CUT_FULL_SHIFT = 0.22;
+const CUT_RATE_START = 1.5;
+const CUT_RATE_FULL = 4;
+
+/**
+ * How much of the flash guard survives a cut that the exposure servo has
+ * already answered by itself.
+ *
+ * The guard was doing two jobs at once: covering the servo's lag (the scene is
+ * bright *now*, the servo needs `dimTau` to get there) and blunting the
+ * transient itself. Snapping removes the first job, so stacking the whole guard
+ * on top of an already-correct exposure just over-dims. What remains is the
+ * second job, which is real: the eye is dark-adapted at the moment of a cut out
+ * of a night scene, and `flashTau` is roughly how long that lasts.
+ *
+ * The damping is scaled by how much dimming the snap actually delivered, not
+ * merely by whether a cut happened — see `updateAdaptState`. On content already
+ * pinned at `minExposure` the servo has no room left to move, the snap
+ * contributes nothing, and the guard is the only transient protection there is.
+ */
+export const FLASH_CUT_RESIDUAL = 0.4;
+
+/**
+ * How far the luminance distribution moved between two frames, in luma units.
+ *
+ * This is the 1-D Wasserstein (earth-mover) distance between the two
+ * histograms, which both callers below want and a plain bin-by-bin difference
+ * is not. A low-contrast frame — fog, a title card, a night interior — keeps
+ * nearly all of its mass in one or two bins, so a slow fade relocates *all* of
+ * it every time the level crosses a bin boundary. Bin-difference metrics read
+ * that as "100% of the frame changed" and would snap several times a second
+ * through a two-second dissolve. Transport distance reads it as one bin width
+ * (0.016), which is what it is.
+ *
+ * Both histograms must be normalised to sum to 1 (as `computeSceneStats`
+ * produces them). When either is missing, `meanDelta` is used instead: it is a
+ * strict lower bound on the transport distance, because moving mass `m` across
+ * a luma gap `d` moves the mean by at most `m * d`. So the fallback can only
+ * ever under-detect a cut, never invent one.
+ */
+export function sceneShift(
+  next: ArrayLike<number> | undefined,
+  previous: ArrayLike<number> | null | undefined,
+  meanDelta: number,
+): number {
+  const fallback = clamp01(Math.abs(meanDelta));
+  const bins = next?.length ?? 0;
+  if (!next || !previous || bins === 0 || previous.length !== bins) return fallback;
+
+  // One pass, carrying the running difference of the two CDFs: the integral of
+  // |F - G| over 0..1 is exactly the transport distance.
+  let carry = 0;
+  let work = 0;
+  for (let i = 0; i < bins; i++) {
+    const a = next[i] as number;
+    const b = previous[i] as number;
+    carry += (Number.isFinite(a) ? a : 0) - (Number.isFinite(b) ? b : 0);
+    work += Math.abs(carry);
+  }
+  // The max is a no-op for consistent inputs, since the bound above holds. It
+  // matters only for a caller whose histogram and mean disagree.
+  return clamp01(Math.max(work / bins, fallback));
+}
+
 /** The two ends of the adaptive range: a bright scene and a dark one. */
 export function adaptBounds(params: VideoParams): { bright: AdaptState; dark: AdaptState } {
-  const base = { flash: 0, prevMean: 0, initialized: true, histogram: null };
+  const base = {
+    flash: 0,
+    prevMean: 0,
+    initialized: true,
+    histogram: null,
+    prevHistogram: null,
+    cut: 0,
+  };
   return {
     bright: { ...base, exposure: params.adapt.minExposure, liftScale: 0, rollScale: 1 },
     dark: { ...base, exposure: params.adapt.maxExposure, liftScale: 1, rollScale: DARK_ROLL_FLOOR },
@@ -260,17 +374,21 @@ export function computeSceneStats(rgba: ArrayLike<number>): SceneStats {
   };
 }
 
-/** Exponentially smooth the incoming histogram into the one held in state. */
+/**
+ * Exponentially smooth the incoming histogram into the one held in state.
+ * `snap` (0..1) pulls the blend towards taking the new frame whole, so a cut
+ * re-shapes the slope allocation on the same frame the rest of the state does.
+ */
 function blendHistogram(
   previous: Float32Array | null | undefined,
   next: ArrayLike<number> | undefined,
   step: number,
-  snap: boolean,
+  snap: number,
 ): Float32Array | null {
   if (!next || next.length === 0) return null;
   const out = new Float32Array(next.length);
-  const fresh = snap || !previous || previous.length !== next.length;
-  const k = fresh ? 1 : 1 - Math.exp(-step / HIST_TAU);
+  const fresh = !previous || previous.length !== next.length;
+  const k = fresh ? 1 : lerp(1 - Math.exp(-step / HIST_TAU), 1, clamp01(snap));
   for (let i = 0; i < next.length; i++) {
     const target = next[i] as number;
     const value = Number.isFinite(target) ? Math.max(0, target) : 0;
@@ -286,6 +404,19 @@ function blendHistogram(
  * happens quickly (a scene got bright, protect the viewer) while recovery is
  * slow (avoid visible breathing). A separate fast-acting flash guard handles
  * single-sample luminance jumps such as cuts to white or camera flashes.
+ *
+ * Those time constants are the right answer for *continuous* footage and the
+ * wrong one at a cut. Easing exists to hide a correction inside content that is
+ * already moving; at a cut there is nothing to hide it in, and nothing that
+ * needs hiding either, because the cut itself masks any change made on the same
+ * frame. Easing is actively worse there: the new scene arrives, the curve does
+ * not, and the picture visibly drifts for up to `recoverTau` afterwards.
+ *
+ * So the state is eased and snapped in the same expression. `cut` (0..1) blends
+ * between the eased value and the target and reaches 1 once the frame's
+ * luminance distribution has moved far enough, fast enough, to be a scene change
+ * rather than motion — see {@link sceneShift}. The first analysed frame is a
+ * full cut by definition, which is where the old first-frame special case went.
  */
 export function updateAdaptState(
   state: AdaptState,
@@ -303,6 +434,26 @@ export function updateAdaptState(
   // How much light the frame emits, as opposed to how dark it looks.
   const light = Math.max(clamp01(stats.light ?? stats.mean), 1e-3);
 
+  // --- scene change --------------------------------------------------------
+  // How far the distribution travelled, and how much of that reads as a cut
+  // rather than as motion. Both gates are smoothstepped rather than thresholded
+  // so there is no pair of near-identical frames either side of a cliff, one
+  // easing and one snapping.
+  const shift = sceneShift(stats.histogram, state.prevHistogram, mean - state.prevMean);
+  const cut = state.initialized
+    ? smoothstep(clamp01((shift - CUT_MIN_SHIFT) / (CUT_FULL_SHIFT - CUT_MIN_SHIFT))) *
+      smoothstep(clamp01((shift / step - CUT_RATE_START) / (CUT_RATE_FULL - CUT_RATE_START)))
+    : 1;
+
+  // --- exposure ------------------------------------------------------------
+  // Only ever pull bright scenes down. Dark scenes are opened up with the
+  // shadow curve instead, because multiplying a dark frame amplifies noise.
+  // The target is the gain that lands emitted light on the comfort budget,
+  // floored by what the strength setting allows. Resolved before the flash
+  // guard because the guard needs to know what the servo is about to do.
+  const targetExposure = clamp(COMFORT_LIGHT / light, cfg.minExposure, cfg.maxExposure);
+  const exposureTau = targetExposure < state.exposure ? cfg.dimTau : cfg.recoverTau;
+
   // --- flash guard ---------------------------------------------------------
   // Two conditions must hold: the mean must rise *fast* (rate test, so the
   // result does not depend on the sampling interval) and it must rise *far*
@@ -315,6 +466,21 @@ export function updateAdaptState(
       const magnitude = clamp01((jump - FLASH_MIN_JUMP) / (FLASH_FULL_JUMP - FLASH_MIN_JUMP));
       flash = Math.max(flash, magnitude);
     }
+    // Hand the guard's first job — covering the servo's lag — over to the snap,
+    // but only to the extent the snap can actually do it. `snapDim` is the
+    // fraction of brightness the servo is removing on this frame by itself and
+    // `guardDim` is what the guard would remove; the guard is scaled back in
+    // proportion to how much of its own contribution has been made redundant.
+    //
+    // The distinction matters on content already pinned at `minExposure`: the
+    // servo has no room left, `snapDim` is 0, and the guard stays at full
+    // strength because it is then the only transient protection there is.
+    // Damping on the bare presence of a cut lost most of the response to a
+    // white flash over a bright scene, which is where it is needed most.
+    const snapDim = clamp01(1 - targetExposure / Math.max(state.exposure, 1e-3));
+    const guardDim = flash * clamp01(cfg.flashDim);
+    const covered = guardDim > 0 ? clamp01(snapDim / guardDim) : 0;
+    flash *= 1 - cut * covered * (1 - FLASH_CUT_RESIDUAL);
     flash = approach(flash, 0, step, cfg.flashTau);
   } else {
     flash = 0;
@@ -339,14 +505,6 @@ export function updateAdaptState(
     clamp01((light - LIFT_VETO_START) / (LIFT_VETO_FULL - LIFT_VETO_START)),
   );
 
-  // --- exposure ------------------------------------------------------------
-  // Only ever pull bright scenes down. Dark scenes are opened up with the
-  // shadow curve instead, because multiplying a dark frame amplifies noise.
-  // The target is the gain that lands emitted light on the comfort budget,
-  // floored by what the strength setting allows.
-  const targetExposure = clamp(COMFORT_LIGHT / light, cfg.minExposure, cfg.maxExposure);
-  const exposureTau = targetExposure < state.exposure ? cfg.dimTau : cfg.recoverTau;
-
   // --- shadow lift ---------------------------------------------------------
   // Crushed shadow detail only counts once the scene as a whole reads dark and
   // is not also emitting a lot of light: a well-exposed frame legitimately
@@ -366,30 +524,29 @@ export function updateAdaptState(
   const glare = clamp01((highlight - GLARE_START) / (GLARE_FULL - GLARE_START));
   const targetRoll = clamp01(Math.max(darkEngage * DARK_ROLL_FLOOR, glare, brightEngage));
 
-  const histogram = blendHistogram(state.histogram, stats.histogram, step, !state.initialized);
+  const histogram = blendHistogram(state.histogram, stats.histogram, step, cut);
+  // The comparison reference for the next frame has to be this frame's raw
+  // histogram, not the smoothed one. 256 bytes per analysed frame, against the
+  // ~5 KB read-back that produced it.
+  const prevHistogram =
+    stats.histogram && stats.histogram.length > 0 ? Float32Array.from(stats.histogram) : null;
 
-  if (!state.initialized) {
-    // Snap on the first analysed frame so playback does not start with a
-    // visible ramp.
-    return {
-      exposure: targetExposure,
-      liftScale: targetLift,
-      rollScale: targetRoll,
-      flash: 0,
-      prevMean: mean,
-      initialized: true,
-      histogram,
-    };
-  }
+  // Ease, then blend the eased value towards the target by however much of this
+  // step was a scene change. At cut = 1 this is a straight snap, which is also
+  // exactly what the first analysed frame gets.
+  const ease = (current: number, target: number, tau: number): number =>
+    lerp(approach(current, target, step, tau), target, cut);
 
   return {
-    exposure: clamp(approach(state.exposure, targetExposure, step, exposureTau), 0.2, 2),
-    liftScale: clamp01(approach(state.liftScale, targetLift, step, 1.2)),
-    rollScale: clamp01(approach(state.rollScale, targetRoll, step, 0.8)),
+    exposure: clamp(ease(state.exposure, targetExposure, exposureTau), 0.2, 2),
+    liftScale: clamp01(ease(state.liftScale, targetLift, LIFT_TAU)),
+    rollScale: clamp01(ease(state.rollScale, targetRoll, ROLL_TAU)),
     flash: clamp01(flash),
     prevMean: mean,
     initialized: true,
     histogram,
+    prevHistogram,
+    cut,
   };
 }
 
