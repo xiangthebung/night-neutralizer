@@ -157,13 +157,25 @@
           <span class="track" aria-hidden="true"><span class="thumb"></span></span>
         </label>
 
-        <label class="toggle" for="video">
-          <span class="toggle-name">Video<span class="toggle-hint"
-              >shadow lift + roll-off</span
-            ></span>
-          <input type="checkbox" id="video" />
-          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-        </label>
+        <!--
+          The two halves of the picture path share one row. They are genuinely
+          separate switches — a video is measured and corrected for what it
+          contains, a still gets one fixed curve — but the popup has a 600 px
+          height budget and a fifth full-width switch does not fit inside it.
+        -->
+        <div class="toggle-row">
+          <label class="toggle" for="video">
+            <span class="toggle-name">Video</span>
+            <input type="checkbox" id="video" />
+            <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+          </label>
+
+          <label class="toggle" for="images">
+            <span class="toggle-name">Images</span>
+            <input type="checkbox" id="images" />
+            <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+          </label>
+        </div>
 
         <label class="toggle" for="night-eq">
           <span class="toggle-name">Night EQ<span class="toggle-hint"
@@ -194,9 +206,10 @@
             <span class="dot" id="audio-dot" data-state="idle" aria-hidden="true"></span>
             <span id="audio-status">Checking audio…</span>
           </p>
+          <!-- One line for the whole picture path: moving pictures and still ones. -->
           <p class="status-line">
-            <span class="dot" id="video-dot" data-state="idle" aria-hidden="true"></span>
-            <span id="video-status">Checking video…</span>
+            <span class="dot" id="picture-dot" data-state="idle" aria-hidden="true"></span>
+            <span id="picture-status">Checking the picture…</span>
           </p>
           <p class="notes" id="notes" hidden></p>
         </div>

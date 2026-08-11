@@ -77,6 +77,12 @@ describe('sanitizeSettings', () => {
     expect(result.video).toBe(false);
   });
 
+  it('turns still images on for settings written before the toggle existed', () => {
+    const legacy = { enabled: true, strength: 45, audio: true, video: true };
+    expect(sanitizeSettings(legacy).images).toBe(true);
+    expect(sanitizeSettings({ images: false }).images).toBe(false);
+  });
+
   it('defaults to running only at night, 21:00 to 07:00', () => {
     const fresh = sanitizeSettings({});
     expect(fresh.nightOnly).toBe(true);
@@ -188,6 +194,7 @@ describe('settingsEqual', () => {
       { linked: false },
       { audioStrength: 1 },
       { videoStrength: 1 },
+      { images: false },
       { nightEq: true },
       { nightOnly: false },
       { nightStart: 1 },

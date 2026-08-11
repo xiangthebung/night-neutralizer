@@ -1,17 +1,22 @@
 /**
  * Adaptive video tone mapping.
  *
- * Loop (default 8 Hz):
+ * Once per presented frame, on `requestVideoFrameCallback`:
  *   1. pick the "primary" video: the largest visible, playing one;
  *   2. draw it into a 48x27 offscreen canvas and read the pixels back;
- *   3. summarise luminance (mean / p10 / p90 / p99.5);
+ *   3. summarise luminance (mean / p10 / p90 / p99.5) and re-aim the targets;
  *   4. advance the adaptation state (asymmetric smoothing, snapping on a cut,
  *      plus the flash guard);
  *   5. rebuild the 33-entry tone curve and push it into the SVG filter.
  *
+ * Steps 2-3 are the only expensive ones, and the only ones the engine will skip:
+ * when a read-back turns out to cost more than its share of a frame, they run
+ * every `frameStride`-th frame instead. Steps 4-5 always run, on every frame.
+ * Letting the skip rate govern both is what made a ramp arrive as a staircase.
+ *
  * The measurement is deliberately tiny: a 48x27 read-back costs well under a
- * millisecond and runs 8 times per second, and the *effect* itself is applied
- * by the compositor, not by JavaScript.
+ * millisecond, and the *effect* itself is applied by the compositor, not by
+ * JavaScript.
  *
  * When frames cannot be read - Widevine/EME content, or a cross-origin video
  * without CORS headers, both of which taint the canvas - the engine switches to
@@ -20,6 +25,7 @@
  */
 import type { VideoMode, VideoParams } from '../core/types';
 import {
+  advanceAdaptState,
   buildToneCurve,
   computeSceneStats,
   createAdaptState,
@@ -42,10 +48,20 @@ const FALLBACK_INTERVAL_MS = 125;
 const UPKEEP_INTERVAL_MS = 250;
 const SLOW_INTERVAL_MS = 500;
 const BLACK_FRAME_LIMIT = 150; // ~5 s of pure black while playing at 30 fps
-/** Above this measured cost per sample, skip frames. */
+/** Sampling budget, in milliseconds of main-thread time per presented frame. */
 const COST_BUDGET_MS = 1.2;
-/** Minimum gap between LUT writes; a rising flash overrides it. */
-const MIN_PUSH_INTERVAL_MS = 30;
+/** Coarsest sampling the engine will fall back to. */
+const MAX_FRAME_STRIDE = 8;
+/**
+ * Backstop gap between LUT writes. The real rate limiter is
+ * `requestVideoFrameCallback`, which cannot fire more than once per presented
+ * frame, plus the unchanged-table check in `ToneFilter.setCurve`. This only
+ * exists so a future non-frame-driven caller cannot storm the filter, and is
+ * set below the frame interval of any real display (200 Hz) so that it cannot
+ * bite: at 30 ms it silently dropped every other frame on 60 fps content,
+ * holding the curve one frame stale half the time.
+ */
+const MIN_PUSH_INTERVAL_MS = 5;
 
 type Analysability = 'unknown' | 'readable' | 'unreadable';
 
@@ -65,6 +81,49 @@ interface SampleResult {
   stats: SceneStats | null;
   /** True when this element can never be analysed again. */
   unreadable: boolean;
+}
+
+/**
+ * How many presented frames to skip between luminance samples, given what one
+ * sample currently costs.
+ *
+ * The comparison is against the *duty cycle* — cost per presented frame — and
+ * not against the raw per-sample cost. Skipping frames does not make an
+ * individual read-back any cheaper, so a test on the cost alone has no fixed
+ * point: one sample over the line ratchets the stride 1 -> 2 -> 4 -> 8 and
+ * nothing can ever bring it back, because the number being tested never
+ * changes. That pinned the analysis at 7.5 Hz on 60 fps content whenever a
+ * read-back cost more than the budget, which is ordinary for a 4K source.
+ *
+ * The hysteresis band is `(budget/2, budget]`, half-open and exactly one stride
+ * step wide. Half-open matters: with both ends open a cost landing exactly on a
+ * boundary is stable at two different strides at once, so the rate the engine
+ * settles at depends on the order it got there, and a video can sit a step
+ * coarser than it needs to indefinitely. Closed at the bottom, every cost has a
+ * single fixed point — the finest stride that fits the budget — and halving can
+ * still never overshoot into the up-shift condition, so it cannot oscillate.
+ *
+ * Pure and exported because this is untestable in a browser: its only
+ * observable is the update rate, and `performance.now()` is clamped to 100 us
+ * without cross-origin isolation, so for a cheap read-back the measured cost is
+ * mostly quantisation noise. The shipping budget is twelve clock quanta, which
+ * is why that clamping does not matter in practice.
+ */
+export function nextFrameStride(
+  stride: number,
+  sampleCostMs: number,
+  budgetMs = COST_BUDGET_MS,
+): number {
+  const current = clampStride(stride);
+  const perFrameMs = sampleCostMs / current;
+  if (perFrameMs > budgetMs && current < MAX_FRAME_STRIDE) return current * 2;
+  if (perFrameMs <= budgetMs / 2 && current > 1) return current / 2;
+  return current;
+}
+
+function clampStride(stride: number): number {
+  if (!Number.isFinite(stride) || stride < 1) return 1;
+  return Math.min(MAX_FRAME_STRIDE, 2 ** Math.round(Math.log2(stride)));
 }
 
 export interface VideoEngineStatus {
@@ -95,6 +154,9 @@ export class VideoEngine {
   private frameHandle = 0;
   private frameCounter = 0;
   private frameStride = 1;
+  /** When the state was last advanced: every presented frame. */
+  private lastStepAt = 0;
+  /** When a frame was last analysed: every `frameStride`-th presented frame. */
   private lastMeasureAt = 0;
   private lastPushAt = 0;
 
@@ -264,6 +326,7 @@ export class VideoEngine {
 
     this.frameVideo = candidate;
     this.frameCounter = 0;
+    this.lastStepAt = now();
     this.lastMeasureAt = now();
 
     const step = (): void => {
@@ -275,8 +338,12 @@ export class VideoEngine {
         return;
       }
       // Frame skipping keeps the read-back cost bounded on expensive
-      // GPU/driver combinations and very high resolutions.
+      // GPU/driver combinations and very high resolutions. It skips the
+      // *measurement* only: every presented frame still advances the state and
+      // rewrites the curve, because the read-back is the expensive half and the
+      // integration is a few `exp` calls.
       if (++this.frameCounter % this.frameStride === 0) this.measure(candidate, record);
+      else this.advance();
       this.frameHandle = candidate.requestVideoFrameCallback?.(step) ?? 0;
     };
 
@@ -306,7 +373,11 @@ export class VideoEngine {
     if (!this.params) return false;
 
     const started = now();
-    const dt = this.lastMeasureAt > 0 ? (started - this.lastMeasureAt) / 1000 : 1 / 60;
+    const dt = this.lastStepAt > 0 ? (started - this.lastStepAt) / 1000 : 1 / 60;
+    // The rate gates inside `updateAdaptState` compare this frame against the
+    // last *analysed* one, so they need that interval and not this frame's.
+    const sinceMeasure = this.lastMeasureAt > 0 ? (started - this.lastMeasureAt) / 1000 : dt;
+    this.lastStepAt = started;
     this.lastMeasureAt = started;
 
     const result = this.sample(video, record);
@@ -323,7 +394,7 @@ export class VideoEngine {
 
     record.analysable = 'readable';
     const previousFlash = this.state.flash;
-    this.state = updateAdaptState(this.state, result.stats, this.params, dt);
+    this.state = updateAdaptState(this.state, result.stats, this.params, dt, sinceMeasure);
     this.setMode('adaptive');
     // A scene change and a rising flash both have to reach the screen on the
     // very next frame, so both bypass the push throttle. Throttling a snap
@@ -333,15 +404,32 @@ export class VideoEngine {
     return true;
   }
 
+  /**
+   * A presented frame we chose not to analyse.
+   *
+   * The state still advances and the curve is still rewritten. Skipping the
+   * read-back is what saves the CPU; skipping the update saves nothing worth
+   * having and turns a smooth ramp into a staircase at `fps / stride`. At
+   * stride 4 that measured 3.4 8-bit levels per jump, eight times a second —
+   * comfortably visible on any flat area, and exactly the artefact the frame
+   * callback was supposed to have removed.
+   */
+  private advance(): void {
+    if (!this.params || this.mode !== 'adaptive' || !this.state.initialized) return;
+    const at = now();
+    const dt = this.lastStepAt > 0 ? (at - this.lastStepAt) / 1000 : 1 / 60;
+    this.lastStepAt = at;
+    this.state = advanceAdaptState(this.state, this.params, dt);
+    this.pushCurve();
+  }
+
   private tuneStride(): void {
     if (!this.frameVideo) return;
-    if (this.sampleCostMs > COST_BUDGET_MS && this.frameStride < 8) {
-      this.frameStride *= 2;
-      debug('sampling is expensive, skipping frames', this.sampleCostMs, this.frameStride);
-      if (this.frameStride >= 4) this.note('Reduced analysis rate to keep CPU usage low.');
-    } else if (this.sampleCostMs < COST_BUDGET_MS / 2 && this.frameStride > 1) {
-      this.frameStride /= 2;
-    }
+    const next = nextFrameStride(this.frameStride, this.sampleCostMs);
+    if (next === this.frameStride) return;
+    this.frameStride = next;
+    debug('sampling cost moved the stride', this.sampleCostMs, next);
+    if (next >= 4) this.note('Reduced analysis rate to keep CPU usage low.');
   }
 
   private applyStatic(reason?: string): void {

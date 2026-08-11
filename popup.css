@@ -290,6 +290,33 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   border-top: 1px solid var(--line);
 }
 
+/*
+ * Two switches sharing one row: Video and Images, the two halves of the picture
+ * path. A fifth full-width switch would have cost 26 px, and the popup's whole
+ * height budget is 600 px before Chrome starts scrolling it. Neither name needs
+ * an inline hint the way Night EQ does — the tone-curve graph above is the
+ * explanation, and it is the same curve for both.
+ */
+.toggle-row {
+  display: flex;
+  gap: 14px;
+}
+
+.toggle-row .toggle {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The row behaves like one `.toggle` for the purposes of the separator rule. */
+.toggle + .toggle-row,
+.toggle-row + .toggle {
+  border-top: 1px solid var(--line);
+}
+
+.toggle-row .toggle + .toggle {
+  border-top: 0;
+}
+
 .switch-label {
   font-size: 11px;
   color: var(--text-dim);
@@ -307,8 +334,9 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 }
 
 /*
- * Audio and Video need no explaining once the two graphs above are visible, so
- * their note sits inline on the same row instead of costing a second line. Only
+ * Where a switch does need a note, it sits inline on the same row instead of
+ * costing a second line. Audio and Video need none once the two graphs above are
+ * visible — Video and Images have no room for one anyway, sharing a row — and
  * Night EQ, whose name does not say what it does, keeps a full description.
  */
 .toggle-hint {

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Night Neutralizer",
   "version": "1.0.0",
-  "description": "Softens harsh video and audio for night-time viewing: adaptive tone mapping plus audio dynamic-range compression. 100% local.",
+  "description": "Softens harsh video, images and audio at night: adaptive tone mapping plus audio dynamic-range compression. 100% local.",
   "minimum_chrome_version": "111",
   "permissions": [
     "storage"

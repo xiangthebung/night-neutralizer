@@ -13,17 +13,19 @@ npm run smoke    # end-to-end in headless Chrome
 
 ## 1. Automated: unit tests
 
-`npm test` — 302 tests, no browser required.
+`npm test` — 360 tests, no browser required.
 
 | file | covers |
 | --- | --- |
 | `tests/strength.test.ts` | strength → processing parameters: true bypass at 0, clamping and non-finite input, monotonicity across all 101 values, release lengthening with strength, **make-up gain that accounts for Chromium's own internal make-up** and keeps the modelled peak below full scale at every strength, **a bounded safety stage always present**, quiet boosted more than loud with the range never inverting, every value inside the Web Audio legal range, no discontinuity next to bypass |
 | `tests/soft-clip.test.ts` | safety clipper: exact identity below the knee, never exceeding the ceiling for input up to 50× full scale, monotonic and symmetric, less than 1 dB cost to a full-scale signal, decreasing slope, curve sampling (odd length, exact zero, identity samples on the identity line), identity params producing a straight line |
-| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **scene gating: a scene inside the light budget converges on the identity, a normally exposed scene over it is dimmed by a clean scale (blacks stay black, saturation untouched, every ratio below the shoulder preserved), ordinary true blacks do not count as crushed shadows, and a bright scene is dimmed without being lifted**, **linear-light measurement reading emitted light rather than how dark a frame looks, and percentiles surviving histogram normalisation**, **a bright scene inside a dark frame: not mistaken for a night scene, and its light output really coming down rather than only its top decile**, **slope allocation: more contrast where the scene lives, endpoints unmoved, monotonic and bounded on every scene and strength, capped so a flat region cannot claim slope for its own noise, disengaged entirely when the curve is giving nothing up, and time-smoothed so the LUT cannot pump**, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, **scene-change snapping: the whole state landing on its target on the frame of the cut in both directions, the response reaching its dimmest at the cut and only recovering from there, no snap on motion within a scene, no snap on a flat-frame fade (where every pixel changes bin), a hard cut snapping at 60/30/8 Hz, the mean-only fallback never over-triggering, and the flash guard left at full strength when the servo is already pinned at minExposure**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers on continuous change, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, CSS fallback shape |
+| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **scene gating: a scene inside the light budget converges on the identity, a normally exposed scene over it is dimmed by a clean scale (blacks stay black, saturation untouched, every ratio below the shoulder preserved), ordinary true blacks do not count as crushed shadows, and a bright scene is dimmed without being lifted**, **linear-light measurement reading emitted light rather than how dark a frame looks, and percentiles surviving histogram normalisation**, **a bright scene inside a dark frame: not mistaken for a night scene, and its light output really coming down rather than only its top decile**, **slope allocation: more contrast where the scene lives, endpoints unmoved, monotonic and bounded on every scene and strength, capped so a flat region cannot claim slope for its own noise, disengaged entirely when the curve is giving nothing up, and time-smoothed so the LUT cannot pump**, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, **scene-change snapping: the whole state landing on its target on the frame of the cut in both directions, the response reaching its dimmest at the cut and only recovering from there, no snap on motion within a scene, no snap on a flat-frame fade (where every pixel changes bin), a hard cut snapping at 60/30/8 Hz, the mean-only fallback never over-triggering, and the flash guard left at full strength when the servo is already pinned at minExposure**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers on continuous change, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, **the still-image state: never brightening any input level at any strength (the property the whole blind curve rests on), black staying at black while white comes down, a true bypass at strength 0, dimming monotonically with the slider, sitting exactly half way to the exposure floor, no saturation change because it flattens nothing, no history to depend on, and the CSS fallback not brightening either**, CSS fallback shape |
 | `tests/media-registry.test.ts` | discovery before and after start, dynamic insertion, **duplicate prevention** (re-attach, rescan, DOM move), open shadow roots (and closed ones ignored), removal only after the grace period, re-parented elements surviving, subtree removal, element swap, mutation-storm rescan, throwing handlers, `stop()`/`release()`, idempotent `start()` |
 | `tests/settings.test.ts` | sanitisation of missing/garbage/hostile values, clamping and rounding, unknown keys dropped, save→load round-trip through a fresh store, storage failure falling back to defaults, `ensureDefaults` writing only once, reset, change notifications, ignoring other areas/keys, unsubscribe not leaking listeners, **migration of pre-split settings** (the old single `strength` mirrored into both channels), exclusion-list cleaning, **the default exclusion array never being shared with stored settings**, effective strength with the link on and off |
 | `tests/site.test.ts` | hostname normalisation (case, `www.`, ports, credentials, trailing dots, IPv6 literals, full URLs, opaque origins), **site keys derived from `location.ancestorOrigins`** so an embedded player is governed by the page it is embedded in, subdomain coverage without matching lookalike hosts (`example.com` covers `news.example.com` but not `notexample.com`), a stray empty entry not disabling the whole web, add/remove including collapsing subdomains under a newly added parent and removing a covering parent when a subdomain is re-enabled, list capping |
 | `tests/readings.test.ts` | the popup's plain-language captions: **the figures agree with the very curves and transfer function the engines use**, each is taken from the adaptation bound where it is actually strongest (reading both video numbers off one bound understates the effect), they match the documented figures at the default strength, they grow monotonically with strength, they **never overstate what the chain delivers** (figures are floored), they avoid meaningless output at the bottom of the range ("1.0× brighter", "0% softer"), and they stay under 30 characters so they cannot wrap and push the popup past Chrome's height cap |
+| `tests/video-engine.test.ts` | (jsdom) the frame-skip control law: every frame while the read-back is cheap, **settling on the finest stride that fits the budget instead of ratcheting to the maximum**, **converging to the same stride from any starting point including costs that land exactly on a band edge**, never oscillating once settled, capped at 8, coming back to every frame when sampling gets cheap again, and surviving a nonsense stride or cost |
+| `tests/image-engine.test.ts` | (jsdom) the still-image path: one `img { filter: … }` rule with its own filter id so video and stills can never share a curve, a real 33-entry LUT that ends below full scale, **strength 0 treated as off rather than as an identity curve on every picture on the page**, **self-repair after the page removes the injected nodes**, the timer stopping when switched off, fullscreen re-parenting, a live picture count that needs no per-element bookkeeping, and teardown/`destroy()` leaving no rule behind |
 | `tests/tone-filter.test.ts` | (jsdom) filter and stylesheet installation, idempotency, **self-repair after the page removes the injected nodes**, the CSS-filter fallback, **the `<base href>` workaround writing an absolute URL**, table/saturation writes skipped when unchanged, marking/unmarking, **fullscreen re-parenting of the filter host and back**, teardown leaving no trace but staying rebuildable, `destroy()` refusing to rebuild |
 | `tests/status-reporter.test.ts` | a burst of `schedule()` calls coalescing into one message, unchanged status not resent (ignoring the timestamp), resending once something really changes, ~1 message/second rate limiting, a throwing snapshot builder swallowed, permanent stop once the extension context is gone, `stop()` cancelling a pending report, a rejected `sendMessage` not throwing |
 | `tests/media-origin.test.ts` | Web Audio safety classification: MSE/blob (YouTube, Vimeo), `data:`, `srcObject`, same-origin, `file:`, plain cross-origin flagged risky, CORS-attributed accepted, empty source deferred, unparseable URLs and opaque origins treated conservatively |
@@ -41,7 +43,7 @@ npm run smoke
 
 Installs the built extension into a throwaway Chrome profile over the DevTools
 protocol (`Extensions.loadUnpacked`; Chrome 137+ ignores `--load-extension`),
-serves the test bench, and asserts 70 checks.
+serves the test bench, and asserts 78 checks.
 
 Note that the suite writes `nightOnly: false` and `skipMusic: false` into its
 baseline settings. The shipped defaults only process between 21:00 and 07:00 and
@@ -71,6 +73,28 @@ The checks:
   figure is the one that pins the guard's damping: the servo is already at
   `minExposure` on that pattern, so the snap contributes nothing there and the
   guard must not be scaled back;
+- **still images get a curve of their own**: an `img { filter: … }` rule
+  referencing a *separate* filter definition (so a page's pictures cannot end up
+  breathing with whatever the video on it is doing), a computed `filter` on the
+  `<img>` itself, and a LUT that is read back and checked to be **incapable of
+  brightening any level** — black 0.000, white 0.810 at the default strength.
+  Turning the toggle off removes the rule live and turning it back on restores
+  it, as does strength 0;
+- **LUT writes keep pace with presented frames** (30.2 updates/s against
+  30.2 fps, median gap 33.4 ms against 33.3 ms per frame), measured with a
+  `MutationObserver` on `tableValues` against `requestVideoFrameCallback` on the
+  primary video. This is the observable that the push throttle and the
+  frame-skip budget both govern, and a curve arriving late is judder whatever
+  the adaptation behind it does;
+- **no single update moves the curve far enough to read as a step** (largest
+  smooth update 1.45 of one 8-bit level, median 0.08), from the same
+  `MutationObserver`. Rate alone does not bound how far each write moves the
+  picture, and it is the size of the increment that gets noticed; 1/255 is the
+  finest step the compositor can render at all, so a couple of levels is the
+  floor worth aiming at rather than a slack budget. Cut snaps are excluded and
+  counted separately — they are meant to arrive whole and are masked by the cut
+  itself. Pinning the stride to 4 reproduces the pre-fix behaviour (3.4 levels
+  a jump at 7.8 Hz) and, with the fix, returns the same 1.45 levels as stride 1;
 - one luminance sample costs well under a millisecond, and running the analysis
   at frame rate costs a few percent of one core (measured via
   `Performance.getMetrics` with processing off vs on);
@@ -226,13 +250,31 @@ To test the flash guard by hand, run `nnFlashWedge()` in the page console (or
 dip briefly and settle back within about a second. Repeat with the extension off
 to compare.
 
-**Nested frame, section 5.** The iframe's player must be processed too.
+**Still images, section 5.** The `<img>` carries the same pattern as the canvas
+beside it, and only the `<img>` is processed.
+
+1. With the extension on, the white block in the picture should be clearly
+   darker than the canvas's, and the black block should be *identical* — no
+   lift. A lifted black here would mean the shadow half of the curve has leaked
+   into the image path, which is the one thing it must never do.
+2. The shadow steps should stay as far apart as they are on the right: stills
+   get exposure and a shoulder, never a gamma change.
+3. Turn **Images** off in the popup: the picture must snap back to matching the
+   canvas exactly, with no reload. Turn it back on and it must return.
+4. Set the picture slider to 0: same thing. At 0 the two must be pixel identical.
+5. Scroll a real image-heavy page (a news front page, an image search) at
+   strength 45 and check it reads as "the pictures came down a little", not as
+   "the pictures went grey". Note that a site applying its own CSS `filter` to
+   its images has that overridden while the toggle is on.
+
+**Nested frame, section 6.** The iframe's player must be processed too.
 
 ## 4. Manual: YouTube
 
 1. Open any video, ideally something with dark scenes.
-2. Popup should report `Audio: compressing 1 player` and
-   `Video: adaptive tone mapping (scene analysis on)`.
+2. Popup should report `Audio: compressing 1 player` and a picture line that
+   starts `Picture: adaptive tone mapping`, with the image half after the dot
+   counting whatever thumbnails the page is showing.
 3. Toggle video off and on: the change should be immediately visible, no reload.
 4. Toggle the strength slider during a bright scene and confirm it responds live.
 5. **Navigate to another video from the sidebar** (SPA navigation, no page load):
@@ -264,7 +306,7 @@ Use Netflix, Prime Video, Disney+, or Spotify's web player.
 
 1. Start playback and open the popup. Expect:
    - `Audio: compressing 1 player` — audio compression **does** work;
-   - `Video: fixed night curve (frames not readable)`;
+   - a picture line reading `Picture: fixed night curve · …`;
    - a note explaining that protected video cannot be analysed.
 2. Confirm the video effect is still visible (shadows lifted, highlights
    softer) but does **not** react to scene changes.

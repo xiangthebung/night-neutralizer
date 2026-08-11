@@ -9,6 +9,10 @@ ambushed by a bright cut or an explosion.
   with an optional night EQ that takes the bass down and dialogue up.
 - **Video:** adaptive tone mapping (shadow lift, highlight roll-off, flash
   guard) driven by real per-frame luminance measurements.
+- **Still images:** the same compositor path over `<img>`, with one fixed curve
+  that can only ever darken — a picture's pixels are usually cross-origin and
+  cannot be measured, so it is never guessed at in the direction that would make
+  the screen brighter.
 - **Only when it is actually night.** If the browser exposes an ambient light
   sensor, the room decides; otherwise a configurable window on the clock does.
   Default 21:00–07:00.
@@ -33,6 +37,7 @@ ambushed by a bright cut or an explosion.
 - [Video processing](#video-processing)
   - [Why not canvas or WebGL?](#why-not-canvas-or-webgl)
   - [What "adaptive" means here](#what-adaptive-means-here)
+  - [Still images](#still-images)
 - [Performance](#performance)
 - [Limitations (read this)](#limitations-read-this)
 - [Privacy](#privacy)
@@ -132,7 +137,13 @@ Click the toolbar icon:
   switch says which signal is in charge: a light-sensor reading in lux if the
   browser gives one, otherwise "no light sensor here, so the clock decides". The
   two clock fields below it set the window and only appear while the switch is on.
-- **Audio** / **Video** — process each independently.
+- **Audio** / **Video** / **Images** — process each independently. Video and
+  Images share a row because they are the two halves of the picture path, and
+  because the popup has a height budget. They are a different bargain from each
+  other: a video is measured frame by frame and corrected for what it contains,
+  while a still cannot be measured at all and gets one fixed curve that only
+  ever darkens — see [Still images](#still-images). Both on by default, both
+  driven by the picture slider, and 0 is a bypass for both.
 - **Leave music alone** — on by default. See
   [Leaving music alone](#leaving-music-alone).
 - **Night EQ** — off by default. Compression fixes "I can't hear the dialogue",
@@ -146,10 +157,11 @@ Click the toolbar icon:
   also covers its subdomains, and it matches both the page you are on and the
   origin of an embedded player, so skipping `youtube.com` also silences YouTube
   embeds elsewhere.
-- **Right now on this tab** — shows what is actually happening: how many players
-  are being compressed, and whether video is running *adaptive tone mapping*
+- **Right now on this tab** — shows what is actually happening: one line for
+  sound (how many players are being compressed) and one for the picture, which
+  reports both halves at once — whether video is running *adaptive tone mapping*
   (frames are being measured) or a *fixed night curve* (frames cannot be read,
-  e.g. DRM).
+  e.g. DRM), and how many stills the image curve is on.
 
 Changes apply immediately to open tabs; no reload. Settings live in
 `chrome.storage.sync`, so they follow your Chrome profile.
@@ -189,15 +201,16 @@ the local clock ───────────────────►   �
                                   core/gate.ts
                         "should this frame do anything, and why not"
                                        │
-                        ┌──────────────┼───────────────┐
-                        ▼              ▼               ▼
-                 MediaRegistry    AudioEngine     VideoEngine
-                 (discovery,      (Web Audio      (measure frames,
-                  dedupe,          DRC chain)      push tone curve)
-                  lifecycle)                            │
-                                                        ▼
-                                                   ToneFilter
-                                              (SVG LUT + CSS rule)
+                        ┌──────────┬────┴─────┬───────────────┐
+                        ▼          ▼          ▼               ▼
+                 MediaRegistry AudioEngine VideoEngine    ImageEngine
+                 (discovery,   (Web Audio  (measure       (one fixed
+                  dedupe,       DRC chain)  frames, push    curve for
+                  lifecycle)                tone curve)     every <img>)
+                                                 │               │
+                                                 ▼               ▼
+                                            ToneFilter      ToneFilter
+                                         (SVG LUT + CSS rule, one each)
 ```
 
 Design notes:
@@ -618,10 +631,40 @@ strict lower bound on the transport distance — it can only under-detect a cut,
 never invent one.
 
 A 250 ms timer handles upkeep only (our nodes, the primary choice, fullscreen).
-Frame skipping keeps the cost bounded: if a read-back measures above 1.2 ms the
-engine samples every 2nd, 4th or 8th frame. Where `requestVideoFrameCallback` is
-unavailable it falls back to measuring on an 8 Hz timer. Analysis stops entirely
-while the tab is hidden.
+Where `requestVideoFrameCallback` is unavailable it falls back to measuring on
+an 8 Hz timer. Analysis stops entirely while the tab is hidden.
+
+**Frame skipping keeps the cost bounded**, and the budget is 1.2 ms of main
+thread per *presented frame* — a duty cycle, not a per-sample cost. That
+distinction is the whole control law: skipping frames does not make an
+individual read-back any cheaper, so a budget compared against the raw sample
+cost has no fixed point. One read-back over the line ratcheted the stride
+1 → 2 → 4 → 8 and nothing could bring it back, because the number being tested
+never changed. Anything more expensive than the budget therefore ran at ⅛ rate —
+7.5 Hz on 60 fps content — where a 2.4 ms read-back should skip one frame in two.
+The hysteresis band is `(budget/2, budget]`: half-open, so every cost has a
+single fixed point (the finest stride that fits) rather than being stable at two
+strides at once, and exactly one stride step wide, so a correction cannot
+overshoot and oscillate.
+
+**Skipping a frame skips the measurement, not the update.** Deciding *where* the
+curve should be heading needs a pixel read-back and is the expensive half;
+*moving* it there is a few `exp` calls. Fusing the two let the skip rate govern
+both, so a video that could only afford analysis every fourth frame also only
+had its curve rewritten every fourth frame — and a ramp delivered in
+quarter-second jumps is a visible staircase however correct each jump is.
+Measured in Chrome at stride 4: 3.4 8-bit levels per jump, eight times a second.
+The two halves are now separate functions (`updateAdaptState` re-aims the
+targets, `advanceAdaptState` integrates towards them), and every presented frame
+runs the second one. At stride 4 the largest smooth update is now 1.45 8-bit
+levels — the same figure as at stride 1, so the analysis rate no longer costs
+anything in smoothness. What it does cost is detection latency: the targets a
+skipped frame is easing towards are up to `stride` frames stale.
+
+Because the two halves now run on different clocks, the rate gates take the
+interval since the last *analysed* frame rather than since the last update.
+Dividing a four-frame change by one frame would read every ordinary pan as four
+times as fast as it is, and fire the cut snap and the flash guard on motion.
 
 **Flash guard.** The mean luminance must rise both *fast* and *far*: the
 threshold is a rate (1.2–4.0 luma/second depending on strength), not a
@@ -657,14 +700,83 @@ range — 0.8 of the lift and 0.85 of the roll-off, since one fixed curve has to
 serve both dark and bright scenes. The extension does not describe a static
 filter as adaptive.
 
+### Still images
+
+A bright photograph at 1 a.m. is exactly as unpleasant as a bright frame of
+video, so `<img>` gets the same machinery: a second, independent
+`feComponentTransfer` filter, referenced by one CSS rule.
+
+```css
+img { filter: url("#nn-image-tone-curve") !important; }
+```
+
+**Stills are toned blind, and that is a hard constraint rather than a choice.**
+Drawing a cross-origin image into a canvas taints it, and most pictures on a
+page come from a CDN without CORS headers, so their pixels cannot be read at
+all. The extension has no host permissions and never fetches anything, so there
+is no second route to them either. Measuring only the minority that *are*
+readable would tone two photographs sitting side by side differently depending
+on which host happened to serve them, which is a worse artefact than treating
+both the same.
+
+So the image curve is the half of the tone map that is safe without knowing what
+it is looking at:
+
+| stage | video | stills |
+| --- | --- | --- |
+| exposure | measured: `comfortLight / light`, floored at `minExposure` | fixed, half way from 1 to `minExposure` |
+| shadow lift + gamma | engaged on dark scenes | **never** |
+| highlight shoulder | engaged on glare | always armed |
+| saturation compensation | scales with the lift | none, because nothing is flattened |
+| slope allocation | from the frame histogram | none, there is no histogram |
+
+The lift is the part that must not run blind. It exists to open up a night scene
+and it brightens everything below the knee to do it, so on a page of
+photographs it would *increase* the light coming off the screen — the opposite
+of the point. The shoulder has no such failure mode: it only ever darkens, only
+above the knee, so on a dark picture it does nothing at all. Hence one armed and
+the other not. The unit tests pin the resulting property directly: no input
+level, at any strength, may come out brighter than it went in.
+
+The exposure constant is the one judgement call. `minExposure` is the servo's
+answer to a frame *measured* to be over the light budget; applying it to every
+picture on the page would dim the dark ones exactly as hard as the bright ones,
+and unity would dim none of them. Half way is the honest constant when the
+brightness is unknown, and it still scales with the slider.
+
+| input | 0.00 | 0.05 | 0.25 | 0.50 | 0.90 | 1.00 | light |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| strength 20 | 0.000 | 0.049 | 0.243 | 0.487 | 0.875 | 0.952 | 0.59 → 0.58 |
+| strength 45 | 0.000 | 0.045 | 0.223 | 0.447 | 0.774 | 0.810 | 0.59 → 0.52 |
+| strength 100 | 0.000 | 0.038 | 0.188 | 0.375 | 0.570 | 0.585 | 0.59 → 0.40 |
+
+(`light` is the emitted light of a full 0–255 ramp, before and after.) Black
+stays at black in every row, which is the whole difference from the video static
+curve.
+
+**There is no element discovery either**, and that is what keeps this cheap. The
+rule is a bare `img` selector rather than a marked attribute, so pictures added
+later — infinite scroll, lazy loading, an SPA route change — are covered by the
+CSS engine at no cost: no MutationObserver, no per-element bookkeeping, no
+layout reads. The video path cannot do that because it has to pick a primary
+element to measure; here there is nothing to measure. A 2 s timer handles the
+same upkeep the video engine does (repair our nodes if the page removes them,
+follow the fullscreen subtree), and switching the toggle off removes the
+stylesheet and the filter definition entirely.
+
 ---
 
 ## Performance
 
 - **The effect itself costs no per-frame JavaScript.** The LUT is applied by the
-  compositor. A curve update is one attribute write, throttled to ~33/s and
-  skipped when the curve is unchanged (a scene change and a rising flash both
-  bypass the throttle so they land on the next frame).
+  compositor. A curve update is one attribute write, skipped when the curve is
+  unchanged. It runs **once per presented frame** — measured at 30.3 LUT updates
+  per second against a 30.3 fps source, a median gap of 33.3 ms against 33.3 ms
+  per frame. It used to carry a 30 ms minimum gap, which is invisible below
+  33 fps and silently drops every other frame above it: on 60 fps content the
+  curve was one frame stale half the time, which reads as judder no amount of
+  adaptation quality can fix. The real rate limiter is `requestVideoFrameCallback`,
+  which cannot fire more than once per presented frame anyway.
 - **Measurement** is one 48×27 `drawImage` + `getImageData` per sampled frame,
   measured at **0.013 ms per sample** on the synthetic 640×360 test clip in
   headless Chrome. End to end, running the analysis at frame rate cost
@@ -742,6 +854,21 @@ Consequences:
   ramp and is handled by the slower scene adaptation instead.
 - **Saturation compensation is global** (`saturate()`), not perceptual. At
   maximum strength, extremely saturated highlights can shift slightly.
+- **Still images are never measured**, for the reason in
+  [Still images](#still-images): their pixels are usually cross-origin and
+  cannot be read. One fixed curve serves the whole page, so a dark photograph is
+  dimmed by the same amount as a blazing white one — less than that photograph
+  deserves, and the curve is deliberately built so that being wrong about a
+  picture can only ever leave it slightly darker.
+- **The image rule wins over the page's own `filter` on `<img>`.** It is
+  `!important`, like the video rule, so a site that dims, blurs or greys its own
+  pictures with CSS has that overridden while the toggle is on. Turning **Images**
+  off is the escape hatch, and it takes effect without a reload.
+- **Only `<img>` is covered.** CSS `background-image`, `<svg>` artwork, canvas
+  drawings and video posters painted by the page are not: there is no element to
+  attach a filter to without restyling the page's own boxes, which would break
+  layouts. Images inside a shadow root are also missed, because a document
+  stylesheet does not reach into one.
 - **Players that paint into a `<canvas>` get nothing.** The CSS rule targets
   `video[data-nn-tone="1"]`, so a site that decodes into a canvas or a WebGL
   surface instead of presenting a `<video>` is invisible to the video half. The
@@ -783,7 +910,7 @@ Consequences:
   buffer, reduced to four numbers, and thrown away. They are never stored,
   transmitted, or exposed to the page.
 - **What is stored on disk:** your settings, in `chrome.storage.sync` — the master
-  switch, the strength values, the audio/video/night-EQ/music toggles, the night
+  switch, the strength values, the audio/video/image/night-EQ/music toggles, the night
   window, and the list of hostnames you have chosen to skip. Nothing else.
 - **What is held in memory:** short-lived per-frame status summaries and the latest
   ambient light reading, in `chrome.storage.session`, which is memory-only, dropped
@@ -833,10 +960,11 @@ Chrome will then only inject the content script on those sites.
 
 ## Testing
 
-Unit tests (`npm test`, 302 tests) cover the strength → parameter mapping
+Unit tests (`npm test`, 340 tests) cover the strength → parameter mapping
 (including the night EQ and the transfer model the popup plots), tone-curve maths
-and adaptation behaviour (including sampling-rate-independent flash detection),
-the safety clipper, media discovery and duplicate prevention, settings
+and adaptation behaviour (including sampling-rate-independent flash and
+scene-change detection), the frame-skip control law, the safety clipper, media
+discovery and duplicate prevention, settings
 persistence and migration, hostname normalisation and per-site matching, origin
 classification, the night window's midnight wrap and boundary arithmetic, the lux
 classifier's hysteresis and publishing throttle, the music host and element
@@ -916,6 +1044,7 @@ src/
     light-sensor.ts        AmbientLightSensor wrapper (absence is normal)
     audio-engine.ts        Web Audio chain, probes, rollback
     video-engine.ts        frame measurement + adaptation loop
+    image-engine.ts        the fixed <img> curve (no measurement, no discovery)
     tone-filter.ts         SVG filter + CSS rule management
     status-reporter.ts     throttled status push
   background/

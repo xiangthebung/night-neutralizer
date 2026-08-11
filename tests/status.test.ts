@@ -15,6 +15,7 @@ function frame(overrides: Partial<FrameStatus> = {}): FrameStatus {
     mediaElements: 1,
     audio: { state: 'active', processed: 1, skipped: 0 },
     video: { mode: 'adaptive', elements: 1, technique: 'svg-tone-curve' },
+    images: { active: true, elements: 3 },
     notes: [],
     ...overrides,
   };
@@ -44,6 +45,20 @@ describe('aggregateStatuses', () => {
     expect(status.audio.processed).toBe(1);
     expect(status.audio.skipped).toBe(1);
     expect(status.video.elements).toBe(3);
+  });
+
+  it('sums pictures across frames and reports active if any frame is', () => {
+    // An iframe is its own document with its own stylesheet, so "is anything
+    // being toned on this tab" is an OR across frames while the count is a sum.
+    const status = aggregateStatuses([
+      frame({ frameId: 0, images: { active: false, elements: 4 } }),
+      frame({ frameId: 3, images: { active: true, elements: 7 } }),
+    ]);
+    expect(status.images).toEqual({ active: true, elements: 11 });
+    expect(
+      aggregateStatuses([frame({ images: { active: false, elements: 2 } })]).images.active,
+    ).toBe(false);
+    expect(aggregateStatuses([]).images).toEqual({ active: false, elements: 0 });
   });
 
   it('prefers the most informative audio state', () => {

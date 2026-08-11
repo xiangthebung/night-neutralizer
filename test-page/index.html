@@ -41,7 +41,8 @@
         padding-top: 4px;
       }
       video,
-      canvas {
+      canvas,
+      img {
         width: 420px;
         height: 236px;
         background: #000;
@@ -171,7 +172,28 @@
       </figure>
     </div>
 
-    <h2>5. Nested frame</h2>
+    <h2>5. Still images</h2>
+    <p>
+      The <code>&lt;img&gt;</code> carries exactly the pattern drawn on the
+      canvas beside it, which is never processed. Stills get one fixed curve —
+      exposure down a little, highlights rolled off, blacks left where they are
+      — because a page's pictures are usually cross-origin and cannot be
+      measured at all. So the white block should come down, the black block
+      should <em>not</em> come up, and the shadow steps should stay exactly as
+      far apart as they are on the right.
+    </p>
+    <div class="pair">
+      <figure>
+        <img id="still" alt="Grey step wedge test pattern" />
+        <figcaption>&lt;img&gt; — processed</figcaption>
+      </figure>
+      <figure>
+        <canvas id="still-source" width="480" height="270"></canvas>
+        <figcaption>&lt;canvas&gt; source — reference</figcaption>
+      </figure>
+    </div>
+
+    <h2>6. Nested frame</h2>
     <p>
       The manifest injects into all frames, so an embedded player is processed
       too. This iframe runs its own copy of the content script.

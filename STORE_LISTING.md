@@ -4,11 +4,11 @@
 
 Night Neutralizer
 
-Version 1.0.0. Name, version and the short description below are taken verbatim from `src/manifest.json`; the short description is 125 characters, inside the store's 132 limit.
+Version 1.0.0. Name, version and the short description below are taken verbatim from `src/manifest.json`; the short description is 118 characters, inside the store's 132 limit.
 
 ## Summary
 
-Softens harsh video and audio for night-time viewing: adaptive tone mapping plus audio dynamic-range compression. 100% local.
+Softens harsh video, images and audio at night: adaptive tone mapping plus audio dynamic-range compression. 100% local.
 
 ## Category
 
@@ -16,7 +16,7 @@ Accessibility. Well-being is the reasonable alternative if the dashboard's list 
 
 ## Single purpose
 
-Night Neutralizer reduces the dynamic range of the video and audio playing in a tab — lifting shadow detail, rolling highlights off, and bringing quiet dialogue up towards loud effects — so that watching in a dark room does not require a bright screen or a loud volume.
+Night Neutralizer reduces the dynamic range of the video, still images and audio in a tab — lifting shadow detail, rolling highlights off, and bringing quiet dialogue up towards loud effects — so that using a screen in a dark room does not require a bright screen or a loud volume.
 
 ## Detailed description
 
@@ -26,6 +26,7 @@ Night Neutralizer includes:
 
 - Video tone mapping: a per-pixel transfer function that lifts shadows, rolls highlights off before they clip, and compensates the resulting desaturation. It is applied by the compositor through an SVG filter, so it costs no per-frame JavaScript and nothing is inserted between the site and its `<video>` — player controls, native captions, aspect ratio and fullscreen keep working.
 - Scene adaptation: the current frame is measured, at 48×27 pixels, once per presented frame — in linear light, so what is measured is the light actually coming off the screen rather than how dark the frame happens to look. Dark scenes get opened up; anything above a comfortable light level is dimmed by exactly the amount that brings it back down, with its blacks left at black and its contrast redistributed towards the levels the scene actually occupies rather than shaved off the top; a scene already below that level passes through untouched; and a sudden rise in brightness dips exposure and pulls the white point down before decaying back.
+- Still images: the same compositor path over `<img>`, with one fixed curve — exposure down a little and highlights rolled off, blacks left exactly where they are. Pictures are usually served from another origin, which means their pixels cannot be read at all, so the curve is deliberately built so that never knowing what a picture contains can only ever leave it slightly darker rather than washed out. A toggle of its own, on by default.
 - Audio dynamic-range compression per media element: compressor, make-up gain, limiter and an instantaneous safety clipper, arranged so that peaks stay below full scale even when a full-scale burst lands straight after a quiet passage. The site's own volume slider, mute button and keyboard shortcuts keep working, because they act before the graph does.
 - One strength slider, 0 to 100, default 45, or one slider each for audio and video. 0 is a real bypass, not a small effect.
 - Two live graphs of the actual curves, with a caption under each stating the change in numbers — at the default, "dark scenes 2.9× brighter / whites 28% softer" and "quiet parts +9 dB / loud-to-quiet gap −9 dB". They are drawn from the same functions the engines run, so the panel cannot describe an effect the extension is not applying.
@@ -34,7 +35,7 @@ Night Neutralizer includes:
 - Leave music alone, on by default. Dynamic range is the point of a record and a nuisance in a film, so audio-only playback and known music services keep their dynamics. Video is still tone mapped.
 - Skip this site, one click, by hostname — subdomains and embedded players from that host included.
 - `Alt+Shift+N` toggles the whole extension without opening the popup, remappable at `chrome://extensions/shortcuts`. The toolbar badge reads `off`, `site` or `day` so that "deliberately doing nothing" and "broken" do not look the same.
-- A status block that says what is actually happening in the tab: how many players are being compressed, and whether video is running scene analysis or a fixed night curve.
+- A status block that says what is actually happening in the tab: how many players are being compressed, whether video is running scene analysis or a fixed night curve, and how many pictures the image curve is on.
 
 Free. There is no paid tier, no account, no trial and no payment processor anywhere in the source.
 

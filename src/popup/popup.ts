@@ -48,6 +48,7 @@ const el = {
   videoStrengthValue: document.getElementById('video-strength-value') as HTMLOutputElement,
   audio: document.getElementById('audio') as HTMLInputElement,
   video: document.getElementById('video') as HTMLInputElement,
+  images: document.getElementById('images') as HTMLInputElement,
   nightEq: document.getElementById('night-eq') as HTMLInputElement,
   skipMusic: document.getElementById('skip-music') as HTMLInputElement,
   nightOnly: document.getElementById('night-only') as HTMLInputElement,
@@ -56,9 +57,9 @@ const el = {
   nightEnd: document.getElementById('night-end') as HTMLInputElement,
   nightDesc: document.getElementById('night-desc') as HTMLElement,
   audioStatus: document.getElementById('audio-status') as HTMLElement,
-  videoStatus: document.getElementById('video-status') as HTMLElement,
+  pictureStatus: document.getElementById('picture-status') as HTMLElement,
   audioDot: document.getElementById('audio-dot') as HTMLElement,
-  videoDot: document.getElementById('video-dot') as HTMLElement,
+  pictureDot: document.getElementById('picture-dot') as HTMLElement,
   notes: document.getElementById('notes') as HTMLElement,
   siteToggle: document.getElementById('site-toggle') as HTMLButtonElement,
   siteToggleText: document.getElementById('site-toggle-text') as HTMLElement,
@@ -92,6 +93,7 @@ function renderSettings(next: Settings): void {
   el.master.checked = next.enabled;
   el.audio.checked = next.audio;
   el.video.checked = next.video;
+  el.images.checked = next.images;
   el.nightEq.checked = next.nightEq;
   el.skipMusic.checked = next.skipMusic;
   el.nightOnly.checked = next.nightOnly;
@@ -378,6 +380,7 @@ el.master.addEventListener('change', () => {
 
 el.audio.addEventListener('change', () => persist({ audio: el.audio.checked }));
 el.video.addEventListener('change', () => persist({ video: el.video.checked }));
+el.images.addEventListener('change', () => persist({ images: el.images.checked }));
 el.nightEq.addEventListener('change', () => {
   persist({ nightEq: el.nightEq.checked });
   renderLabels(); // the audio graph shape depends on it
@@ -576,26 +579,66 @@ function describeAudio(status: TabStatus, current: Settings): [string, string] {
   }
 }
 
-function describeVideo(status: TabStatus, current: Settings): [string, string] {
-  if (!current.enabled) return ['Video: paused (extension off)', 'off'];
-  if (status.siteDisabled) return [`Video: turned off on ${status.site}`, 'off'];
+/**
+ * The picture line: moving pictures and still ones, in one line.
+ *
+ * Everything above the two halves — the master switch, the exclusion list, the
+ * night gate, a strength of 0 — stops both at once, and repeating each of those
+ * on two lines would be two ways of saying the same thing. Below them the two
+ * halves genuinely differ (a video is measured, a still is not), so they are
+ * reported side by side. One line rather than two is also what keeps the popup
+ * inside Chrome's 600 px cap; see the comment on `.toggle-row`.
+ */
+function describePicture(status: TabStatus, current: Settings): [string, string] {
+  if (!current.enabled) return ['Picture: paused (extension off)', 'off'];
+  if (status.siteDisabled) return [`Picture: turned off on ${status.site}`, 'off'];
   const night = describeNightGate(status, current);
-  if (night) return [`Video: ${night}`, 'off'];
-  if (!current.video) return ['Video: turned off', 'off'];
-  if (videoStrengthOf(current) === 0) return ['Video: bypassed (strength 0)', 'off'];
-  if (status.frames === 0 || status.video.elements === 0)
-    return ['Video: no video element on this page', 'off'];
+  if (night) return [`Picture: ${night}`, 'off'];
+  if (videoStrengthOf(current) === 0) return ['Picture: bypassed (strength 0)', 'off'];
+  if (status.frames === 0) return ['Picture: not available on this page', 'off'];
 
+  const [videoText, videoState] = describeVideoPart(status, current);
+  const [imageText, imageState] = describeImagePart(status, current);
+  // `partial` outranks `active`: something being degraded is the more
+  // informative half, and it is the half that explains a surprise.
+  const state = [videoState, imageState].includes('partial')
+    ? 'partial'
+    : [videoState, imageState].includes('active')
+      ? 'active'
+      : 'off';
+  return [`Picture: ${videoText} · ${imageText}`, state];
+}
+
+/**
+ * Both halves are phrased tightly on purpose: the two of them plus the "Picture:"
+ * prefix have to fit one 274 px line, and a wrapped status line costs 17 px of a
+ * budget that has none to give.
+ */
+function describeVideoPart(status: TabStatus, current: Settings): [string, string] {
+  if (!current.video) return ['video off', 'off'];
+  if (status.video.elements === 0) return ['no video here', 'off'];
   switch (status.video.mode) {
     case 'adaptive':
-      return ['Video: adaptive tone mapping (scene analysis on)', 'active'];
+      return ['adaptive tone mapping', 'active'];
     case 'static':
-      return ['Video: fixed night curve (frames not readable)', 'partial'];
+      return ['fixed night curve', 'partial'];
     case 'unsupported':
-      return ['Video: tone mapping unavailable here', 'partial'];
+      return ['no tone mapping here', 'partial'];
     default:
-      return ['Video: off', 'off'];
+      return ['video off', 'off'];
   }
+}
+
+/**
+ * The still half never claims to be adaptive, because it never is: a picture's
+ * pixels are usually cross-origin and cannot be read, so one fixed curve serves
+ * every image on the page.
+ */
+function describeImagePart(status: TabStatus, current: Settings): [string, string] {
+  if (!current.images || !status.images.active) return ['images off', 'off'];
+  if (status.images.elements === 0) return ['no images here', 'off'];
+  const count = status.images.elements;
+  return [`${count} ${plural(count, 'image')} toned`, 'active'];
 }
 
 function plural(count: number, word: string): string {
@@ -606,9 +649,9 @@ function renderStatus(status: TabStatus | null): void {
   lastStatus = status;
   if (!status) {
     el.audioDot.dataset.state = 'off';
-    el.videoDot.dataset.state = 'off';
+    el.pictureDot.dataset.state = 'off';
     el.audioStatus.textContent = 'Audio: not available on this page';
-    el.videoStatus.textContent = 'Video: not available on this page';
+    el.pictureStatus.textContent = 'Picture: not available on this page';
     el.notes.hidden = false;
     el.notes.textContent =
       'Browser pages (chrome://, the Web Store, other extensions) cannot be modified by extensions.';
@@ -618,11 +661,11 @@ function renderStatus(status: TabStatus | null): void {
   }
 
   const [audioText, audioState] = describeAudio(status, settings);
-  const [videoText, videoState] = describeVideo(status, settings);
+  const [pictureText, pictureState] = describePicture(status, settings);
   el.audioStatus.textContent = audioText;
-  el.videoStatus.textContent = videoText;
+  el.pictureStatus.textContent = pictureText;
   el.audioDot.dataset.state = audioState;
-  el.videoDot.dataset.state = videoState;
+  el.pictureDot.dataset.state = pictureState;
 
   const notes = status.notes.filter(Boolean);
   el.notes.hidden = notes.length === 0;

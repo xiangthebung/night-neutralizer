@@ -71,6 +71,26 @@ export interface SceneStats {
   histogram?: ArrayLike<number>;
 }
 
+/**
+ * Where the adaptation is heading. Recomputed only when a frame is actually
+ * analysed; the integration towards it runs on every presented frame.
+ *
+ * The split exists because the two halves have very different costs. Deciding
+ * the targets needs a pixel read-back, which is the expensive part and the
+ * reason the engine skips frames at high resolutions. Moving towards them is a
+ * handful of `exp` calls. Fusing the two made the skip rate govern both, so a
+ * video that could only afford analysis every fourth frame also only got its
+ * curve rewritten every fourth frame — and a ramp delivered in quarter-second
+ * jumps is a visible staircase, however correct each individual jump is.
+ */
+export interface AdaptTargets {
+  exposure: number;
+  lift: number;
+  roll: number;
+  /** Raw histogram of the last analysed frame, or null when frames carry none. */
+  histogram: Float32Array | null;
+}
+
 export interface AdaptState {
   exposure: number;
   liftScale: number;
@@ -79,6 +99,8 @@ export interface AdaptState {
   flash: number;
   prevMean: number;
   initialized: boolean;
+  /** Resting place for the three scales above; see {@link AdaptTargets}. */
+  targets: AdaptTargets;
   /**
    * Time-smoothed frame histogram, or null when frames carry none. Smoothed
    * because a curve rebuilt from raw per-frame statistics visibly pumps.
@@ -109,6 +131,7 @@ export function createAdaptState(): AdaptState {
     flash: 0,
     prevMean: 0,
     initialized: false,
+    targets: { exposure: 1, lift: 0, roll: 0, histogram: null },
     histogram: null,
     prevHistogram: null,
     cut: 0,
@@ -121,13 +144,70 @@ export function createAdaptState(): AdaptState {
  * histogram, so the slope allocation stays out of it too.
  */
 export function staticAdaptState(params: VideoParams): AdaptState {
+  const lift = params.adapt.staticLiftScale;
+  const roll = params.adapt.staticRollScale;
   return {
     exposure: 1,
-    liftScale: params.adapt.staticLiftScale,
-    rollScale: params.adapt.staticRollScale,
+    liftScale: lift,
+    rollScale: roll,
     flash: 0,
     prevMean: 0,
     initialized: true,
+    // Its own resting place, so advancing it is a no-op rather than a slow
+    // drift back to the identity curve.
+    targets: { exposure: 1, lift, roll, histogram: null },
+    histogram: null,
+    prevHistogram: null,
+    cut: 0,
+  };
+}
+
+/**
+ * How far towards the exposure servo's floor an unmeasured still is dimmed.
+ *
+ * `minExposure` is the servo's answer to a frame it has *measured* to be over
+ * the light budget. Applying it to every picture on a page would dim the dark
+ * half of them exactly as hard as the bright half; unity would dim none of
+ * them. Half way is the honest constant for content whose brightness is
+ * unknown, and it still scales with the slider, so the setting keeps ownership
+ * of how large the effect is.
+ */
+export const IMAGE_EXPOSURE_SHARE = 0.5;
+
+/**
+ * Fixed state used for still images.
+ *
+ * Stills are treated blind, and the reason is the canvas taint rule rather than
+ * cost: most pictures on a page are served from another origin without CORS
+ * headers, so their pixels cannot be read at all. Measuring the minority that
+ * can be read would tone two photographs sitting side by side differently
+ * depending on which CDN happened to serve them, which is a worse artefact than
+ * treating both the same.
+ *
+ * So the curve is the half of the tone map that is safe without knowing what it
+ * is looking at: a modest exposure reduction and the highlight shoulder, with
+ * the shadow lift held at zero.
+ *
+ * The lift is the part that must not run blind. It exists to open up a night
+ * scene, and it brightens everything below the knee to do it — applied to a
+ * page of photographs it would raise the light coming off the screen, which is
+ * the opposite of the point. The shoulder has no such failure mode: it only
+ * ever darkens, and only above the knee, so on a dark picture it does nothing
+ * at all. That is why it is armed in full here while the lift is not armed at
+ * all.
+ */
+export function imageAdaptState(params: VideoParams): AdaptState {
+  const exposure = lerp(1, clamp(params.adapt.minExposure, 0.2, 1), IMAGE_EXPOSURE_SHARE);
+  return {
+    exposure,
+    liftScale: 0,
+    rollScale: 1,
+    flash: 0,
+    prevMean: 0,
+    initialized: true,
+    // Its own resting place: nothing advances this state, but a caller that
+    // does must find it already where it belongs.
+    targets: { exposure, lift: 0, roll: 1, histogram: null },
     histogram: null,
     prevHistogram: null,
     cut: 0,
@@ -309,9 +389,21 @@ export function adaptBounds(params: VideoParams): { bright: AdaptState; dark: Ad
     prevHistogram: null,
     cut: 0,
   };
+  const bright = { exposure: params.adapt.minExposure, liftScale: 0, rollScale: 1 };
+  const dark = {
+    exposure: params.adapt.maxExposure,
+    liftScale: 1,
+    rollScale: DARK_ROLL_FLOOR,
+  };
+  const resting = (s: typeof bright): AdaptTargets => ({
+    exposure: s.exposure,
+    lift: s.liftScale,
+    roll: s.rollScale,
+    histogram: null,
+  });
   return {
-    bright: { ...base, exposure: params.adapt.minExposure, liftScale: 0, rollScale: 1 },
-    dark: { ...base, exposure: params.adapt.maxExposure, liftScale: 1, rollScale: DARK_ROLL_FLOOR },
+    bright: { ...base, ...bright, targets: resting(bright) },
+    dark: { ...base, ...dark, targets: resting(dark) },
   };
 }
 
@@ -381,7 +473,7 @@ export function computeSceneStats(rgba: ArrayLike<number>): SceneStats {
  */
 function blendHistogram(
   previous: Float32Array | null | undefined,
-  next: ArrayLike<number> | undefined,
+  next: ArrayLike<number> | null | undefined,
   step: number,
   snap: number,
 ): Float32Array | null {
@@ -398,7 +490,50 @@ function blendHistogram(
 }
 
 /**
- * Advance the adaptation loop by `dt` seconds.
+ * Move the adaptation `dt` seconds closer to its current targets.
+ *
+ * Deliberately free of `SceneStats`: this is the half that runs on *every*
+ * presented frame, including the ones the engine chose not to analyse. Nothing
+ * here needs to know what the scene looks like, only where it was last seen
+ * heading, so the cost is a few `exp` calls and the smoothness of the result no
+ * longer depends on how often a read-back is affordable.
+ *
+ * `snap` (0..1) blends the eased value towards the target and is non-zero only
+ * on an analysed frame that read as a scene change — see
+ * {@link updateAdaptState}, which is the only caller that passes it.
+ */
+export function advanceAdaptState(
+  state: AdaptState,
+  params: VideoParams,
+  dt: number,
+  snap = 0,
+): AdaptState {
+  const cfg = params.adapt;
+  const step = Number.isFinite(dt) ? clamp(dt, 1 / 240, 1) : 1 / 60;
+  const cut = clamp01(snap);
+  const targets = state.targets;
+
+  // Direction is settled by where the target sits relative to where we are now.
+  // An exponential approach cannot overshoot, so this cannot flip mid-ramp and
+  // is the same answer the measuring frame would have computed.
+  const exposureTau = targets.exposure < state.exposure ? cfg.dimTau : cfg.recoverTau;
+  const ease = (current: number, target: number, tau: number): number =>
+    lerp(approach(current, target, step, tau), target, cut);
+
+  return {
+    ...state,
+    exposure: clamp(ease(state.exposure, targets.exposure, exposureTau), 0.2, 2),
+    liftScale: clamp01(ease(state.liftScale, targets.lift, LIFT_TAU)),
+    rollScale: clamp01(ease(state.rollScale, targets.roll, ROLL_TAU)),
+    flash: clamp01(approach(state.flash, 0, step, cfg.flashTau)),
+    histogram: blendHistogram(state.histogram, targets.histogram, step, cut),
+    cut,
+  };
+}
+
+/**
+ * Analyse a frame: re-aim the targets, then advance by `dt` like any other
+ * frame.
  *
  * Asymmetric time constants are the core of the comfort behaviour: dimming
  * happens quickly (a scene got bright, protect the viewer) while recovery is
@@ -417,17 +552,29 @@ function blendHistogram(
  * luminance distribution has moved far enough, fast enough, to be a scene change
  * rather than motion — see {@link sceneShift}. The first analysed frame is a
  * full cut by definition, which is where the old first-frame special case went.
+ *
+ * Two clocks, because a caller that skips frames has two different intervals
+ * and the rate tests want the other one. `dt` is this frame's share of the
+ * integration, matching what {@link advanceAdaptState} was handed on every
+ * frame in between. `sinceMeasure` is how long ago the frame these statistics
+ * are being compared against was taken, which is what `jump` and `shift` were
+ * accumulated over — dividing those by one frame instead would read a stride of
+ * 4 as a scene changing four times as fast as it is, and fire the flash guard
+ * on ordinary motion. They are equal, and both default to `dt`, whenever the
+ * caller analyses every frame it advances.
  */
 export function updateAdaptState(
   state: AdaptState,
   stats: SceneStats,
   params: VideoParams,
   dt: number,
+  sinceMeasure = dt,
 ): AdaptState {
   const cfg = params.adapt;
   // Clamped to a plausible frame interval: the flash test divides by it, so a
   // bogus dt must not be able to manufacture an enormous rate.
   const step = Number.isFinite(dt) ? clamp(dt, 1 / 240, 1) : 1 / 60;
+  const span = Number.isFinite(sinceMeasure) ? clamp(sinceMeasure, 1 / 240, 1) : step;
   const mean = clamp01(stats.mean);
   const shadow = clamp01(stats.shadow);
   const highlight = clamp01(stats.highlight);
@@ -442,7 +589,7 @@ export function updateAdaptState(
   const shift = sceneShift(stats.histogram, state.prevHistogram, mean - state.prevMean);
   const cut = state.initialized
     ? smoothstep(clamp01((shift - CUT_MIN_SHIFT) / (CUT_FULL_SHIFT - CUT_MIN_SHIFT))) *
-      smoothstep(clamp01((shift / step - CUT_RATE_START) / (CUT_RATE_FULL - CUT_RATE_START)))
+      smoothstep(clamp01((shift / span - CUT_RATE_START) / (CUT_RATE_FULL - CUT_RATE_START)))
     : 1;
 
   // --- exposure ------------------------------------------------------------
@@ -452,7 +599,6 @@ export function updateAdaptState(
   // floored by what the strength setting allows. Resolved before the flash
   // guard because the guard needs to know what the servo is about to do.
   const targetExposure = clamp(COMFORT_LIGHT / light, cfg.minExposure, cfg.maxExposure);
-  const exposureTau = targetExposure < state.exposure ? cfg.dimTau : cfg.recoverTau;
 
   // --- flash guard ---------------------------------------------------------
   // Two conditions must hold: the mean must rise *fast* (rate test, so the
@@ -462,7 +608,7 @@ export function updateAdaptState(
   let flash = state.flash;
   if (state.initialized) {
     const jump = mean - state.prevMean;
-    if (jump > FLASH_MIN_JUMP && jump / step > cfg.flashRate) {
+    if (jump > FLASH_MIN_JUMP && jump / span > cfg.flashRate) {
       const magnitude = clamp01((jump - FLASH_MIN_JUMP) / (FLASH_FULL_JUMP - FLASH_MIN_JUMP));
       flash = Math.max(flash, magnitude);
     }
@@ -481,7 +627,8 @@ export function updateAdaptState(
     const guardDim = flash * clamp01(cfg.flashDim);
     const covered = guardDim > 0 ? clamp01(snapDim / guardDim) : 0;
     flash *= 1 - cut * covered * (1 - FLASH_CUT_RESIDUAL);
-    flash = approach(flash, 0, step, cfg.flashTau);
+    // The decay itself belongs to the per-frame half, so the guard releases on
+    // the same clock whether or not this frame happened to be analysed.
   } else {
     flash = 0;
   }
@@ -524,30 +671,35 @@ export function updateAdaptState(
   const glare = clamp01((highlight - GLARE_START) / (GLARE_FULL - GLARE_START));
   const targetRoll = clamp01(Math.max(darkEngage * DARK_ROLL_FLOOR, glare, brightEngage));
 
-  const histogram = blendHistogram(state.histogram, stats.histogram, step, cut);
-  // The comparison reference for the next frame has to be this frame's raw
-  // histogram, not the smoothed one. 256 bytes per analysed frame, against the
-  // ~5 KB read-back that produced it.
-  const prevHistogram =
+  // This frame's raw histogram serves two purposes and is copied once for both:
+  // it is the comparison reference the next analysed frame measures its shift
+  // against, and it is what the smoothed histogram eases towards in between.
+  // Neither side writes to it. 256 bytes per analysed frame, against the ~5 KB
+  // read-back that produced it.
+  const frame =
     stats.histogram && stats.histogram.length > 0 ? Float32Array.from(stats.histogram) : null;
 
-  // Ease, then blend the eased value towards the target by however much of this
-  // step was a scene change. At cut = 1 this is a straight snap, which is also
-  // exactly what the first analysed frame gets.
-  const ease = (current: number, target: number, tau: number): number =>
-    lerp(approach(current, target, step, tau), target, cut);
-
-  return {
-    exposure: clamp(ease(state.exposure, targetExposure, exposureTau), 0.2, 2),
-    liftScale: clamp01(ease(state.liftScale, targetLift, LIFT_TAU)),
-    rollScale: clamp01(ease(state.rollScale, targetRoll, ROLL_TAU)),
-    flash: clamp01(flash),
-    prevMean: mean,
-    initialized: true,
-    histogram,
-    prevHistogram,
+  // Re-aim, then take this frame's step like any other. Everything above is the
+  // part that needed pixels; the integration below is shared with every frame
+  // the engine did not analyse.
+  return advanceAdaptState(
+    {
+      ...state,
+      flash: clamp01(flash),
+      prevMean: mean,
+      initialized: true,
+      targets: {
+        exposure: targetExposure,
+        lift: targetLift,
+        roll: targetRoll,
+        histogram: frame,
+      },
+      prevHistogram: frame,
+    },
+    params,
+    step,
     cut,
-  };
+  );
 }
 
 /**

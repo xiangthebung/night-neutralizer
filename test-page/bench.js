@@ -101,6 +101,18 @@ nightWedge.srcObject = nightWedgeCanvas.captureStream(30);
 nightWedge.play().catch(() => {});
 
 /**
+ * The still-image pair: the same pattern as a picture and as a canvas.
+ *
+ * A data URL rather than a file, so it is same-origin and identical to the
+ * reference to the byte — the only difference between the two elements is that
+ * one of them is an `<img>`, which is exactly the variable under test. Drawn
+ * once: unlike the wedges above, nothing here has to feed a capture stream.
+ */
+const stillCanvas = document.getElementById('still-source');
+drawWedgePattern(stillCanvas.getContext('2d'), stillCanvas);
+document.getElementById('still').src = stillCanvas.toDataURL('image/png');
+
+/**
  * Flash the pattern white for a moment, then return to exactly the same steady
  * state. That is what makes it possible to see whether the flash guard both
  * fires *and* releases. Used by the smoke test, and handy by hand too:

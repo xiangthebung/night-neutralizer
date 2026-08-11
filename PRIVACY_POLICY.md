@@ -2,14 +2,14 @@
 
 Effective: July 28, 2026
 
-Night Neutralizer softens harsh video and audio for night-time viewing. It runs entirely inside your browser. It has no server, no account, no analytics and no payment processor, and it makes no network requests of any kind.
+Night Neutralizer softens harsh video, images and audio for night-time viewing. It runs entirely inside your browser. It has no server, no account, no analytics and no payment processor, and it makes no network requests of any kind.
 
 ## What is stored, and where
 
 Your settings live in `chrome.storage.sync`, falling back to `chrome.storage.local` when sync is unavailable:
 
 - whether the extension is on, and the strength values for audio and video
-- whether audio processing, video processing and night EQ are enabled
+- whether audio processing, video processing, still-image processing and night EQ are enabled
 - the night window (start and end minutes) and whether processing is limited to it
 - whether music is left alone
 - **the list of hostnames you have excluded**, capped at 200 entries

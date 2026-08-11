@@ -24,6 +24,15 @@ export interface Settings {
   /** Video tone mapping on/off. */
   video: boolean;
   /**
+   * Still-image tone mapping on/off. Separate from `video` because the two are
+   * different bargains: a video is measured frame by frame and corrected for
+   * what it actually contains, while a still gets one fixed curve that can only
+   * ever darken it (see `imageAdaptState`). Someone who wants their films
+   * treated and their photographs left exactly as the photographer left them is
+   * asking for something reasonable, and one toggle cannot express it.
+   */
+  images: boolean;
+  /**
    * Night EQ: shelve the low end down and lift dialogue presence. Compression
    * makes quiet speech loud enough; this is what lets you turn the *volume*
    * down, since bass is what carries through walls.
@@ -70,6 +79,7 @@ export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   videoStrength: 45,
   audio: true,
   video: true,
+  images: true,
   nightEq: false,
   disabledSites: [],
   nightOnly: true,
@@ -195,6 +205,14 @@ export type VideoMode =
   /** Neither path is available in this browser. */
   | 'unsupported';
 
+/** What the still-image half of the picture path is doing in one frame. */
+export interface ImageStatus {
+  /** True when the fixed image curve is installed in this frame. */
+  active: boolean;
+  /** `<img>` elements in this frame's document, filtered or not. */
+  elements: number;
+}
+
 export type AudioState =
   | 'off'
   | 'idle'
@@ -275,6 +293,7 @@ export interface FrameStatus {
     /** Rendering path actually in use. */
     technique: 'svg-tone-curve' | 'css-basic' | 'none';
   };
+  images: ImageStatus;
   notes: string[];
 }
 
@@ -288,6 +307,7 @@ export interface TabStatus {
   mediaElements: number;
   audio: { state: AudioState; processed: number; skipped: number };
   video: { mode: VideoMode; elements: number; technique: FrameStatus['video']['technique'] };
+  images: ImageStatus;
   notes: string[];
   stale: boolean;
 }

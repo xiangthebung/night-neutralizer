@@ -6,12 +6,14 @@ import {
   FLASH_CUT_RESIDUAL,
   HIST_BINS,
   adaptBounds,
+  advanceAdaptState,
   applyCurve,
   buildToneCurve,
   computeSceneStats,
   createAdaptState,
   cssApproxFilter,
   curveToTableValues,
+  imageAdaptState,
   resolveCurve,
   sceneShift,
   slopeWeights,
@@ -879,6 +881,118 @@ describe('scene-change snapping', () => {
   });
 });
 
+describe('per-frame advance', () => {
+  // The engine skips the pixel read-back when it is expensive, but it must not
+  // skip the *integration*: a state that only moves on analysed frames delivers
+  // a ramp in `stride`-sized jumps. Measured in Chrome at stride 4, that was 3.4
+  // 8-bit levels per jump eight times a second — plainly visible on flat areas —
+  // against 1.3 levels per frame once the two halves were separated.
+  const p = mapVideoStrength(45);
+  const night = computeSceneStats(sceneFrame(NIGHT));
+  const dashcam = computeSceneStats(sceneFrame(DASHCAM));
+
+  const settled = (scene: SceneStats) => {
+    let state = createAdaptState();
+    for (let i = 0; i < 240; i++) state = updateAdaptState(state, scene, p, 1 / 60);
+    return state;
+  };
+
+  it('keeps moving on a frame with no statistics at all', () => {
+    // The whole point: no `SceneStats` argument exists, and the curve still
+    // advances towards wherever the last analysed frame aimed it.
+    const aimed = updateAdaptState(settled(night), dashcam, p, 1 / 60);
+    const stale = { ...aimed, exposure: 1, liftScale: 1, rollScale: 0 };
+    const moved = advanceAdaptState(stale, p, 1 / 60);
+    expect(moved.exposure).toBeLessThan(stale.exposure);
+    expect(moved.liftScale).toBeLessThan(stale.liftScale);
+    expect(moved.rollScale).toBeGreaterThan(stale.rollScale);
+    // An advanced frame is never a scene change: nothing was looked at.
+    expect(moved.cut).toBe(0);
+  });
+
+  it('reaches the same place whether or not the frames between were analysed', () => {
+    // Skipping a read-back costs *detection latency* — the targets are a frame
+    // or three stale — and nothing else. Held on one scene the targets do not
+    // move, so the two paths must agree to the last bit.
+    const start = settled(night);
+    const aimed = updateAdaptState(start, dashcam, p, 1 / 60);
+
+    let analysed = aimed;
+    for (let i = 0; i < 12; i++) analysed = updateAdaptState(analysed, dashcam, p, 1 / 60);
+
+    let skipped = aimed;
+    for (let i = 0; i < 12; i++) skipped = advanceAdaptState(skipped, p, 1 / 60);
+
+    expect(skipped.exposure).toBeCloseTo(analysed.exposure, 12);
+    expect(skipped.liftScale).toBeCloseTo(analysed.liftScale, 12);
+    expect(skipped.rollScale).toBeCloseTo(analysed.rollScale, 12);
+    expect(skipped.flash).toBeCloseTo(analysed.flash, 12);
+  });
+
+  it('takes smaller steps than the sampling rate alone would allow', () => {
+    // The regression, stated as maths. Four frames of easing must land within a
+    // whisker of one step of four frames' worth — same destination — while no
+    // individual increment is anywhere near as large.
+    // Aimed at the bright scene but still sitting on the dark one's numbers,
+    // which is what a mid-ramp frame looks like. Feeding the two scenes in
+    // directly would not do: that pair reads as a cut and snaps, leaving no
+    // gap to cross.
+    const start = settled(night);
+    const aimed = updateAdaptState(start, dashcam, p, 1 / 60);
+    const gap = { ...aimed, exposure: start.exposure };
+
+    let perFrame = gap;
+    let worstIncrement = 0;
+    for (let i = 0; i < 4; i++) {
+      const next = advanceAdaptState(perFrame, p, 1 / 60);
+      worstIncrement = Math.max(worstIncrement, Math.abs(next.exposure - perFrame.exposure));
+      perFrame = next;
+    }
+    const oneJump = advanceAdaptState(gap, p, 4 / 60);
+    const jump = Math.abs(oneJump.exposure - gap.exposure);
+
+    // Exact, not approximate: an exponential approach composes, so four steps
+    // of dt and one of 4dt are the same number.
+    expect(perFrame.exposure).toBeCloseTo(oneJump.exposure, 12);
+    // The ideal is a quarter of the jump; the taus buy a little back.
+    expect(jump).toBeGreaterThan(0.01);
+    expect(worstIncrement).toBeLessThan(jump * 0.35);
+  });
+
+  it('leaves a state with nowhere to go exactly where it is', () => {
+    // A fresh state and the static (DRM) one both rest on their own targets, so
+    // advancing either cannot drag it towards some other curve.
+    for (const state of [createAdaptState(), staticAdaptState(p)]) {
+      let held = state;
+      for (let i = 0; i < 60; i++) held = advanceAdaptState(held, p, 1 / 60);
+      expect(held.exposure).toBeCloseTo(state.exposure, 12);
+      expect(held.liftScale).toBeCloseTo(state.liftScale, 12);
+      expect(held.rollScale).toBeCloseTo(state.rollScale, 12);
+    }
+  });
+
+  it('measures rates against the last analysed frame, not the last advance', () => {
+    // The rate gates divide by an interval. Handing them one frame while the
+    // statistics span four would read every ordinary pan as four times as fast
+    // as it is, and fire the cut snap and the flash guard on motion.
+    const start = settled(night);
+    // Far enough to clear the magnitude gate — below it nothing is a cut at any
+    // speed — so that the rate is the only thing left to disagree about.
+    const pan = computeSceneStats(sceneFrame(NIGHT.map(([l, w]) => [l + 0.15, w])));
+
+    const honest = updateAdaptState(start, pan, p, 1 / 60, 4 / 60);
+    const inflated = updateAdaptState(start, pan, p, 1 / 60, 1 / 60);
+    expect(inflated.cut).toBeGreaterThan(0.4);
+    expect(honest.cut).toBeLessThan(inflated.cut);
+    expect(honest.flash).toBeLessThanOrEqual(inflated.flash);
+
+    // Omitting it is the every-frame case, and must change nothing.
+    const implied = updateAdaptState(start, pan, p, 1 / 60);
+    expect(implied.cut).toBe(inflated.cut);
+    expect(implied.exposure).toBeCloseTo(inflated.exposure, 12);
+  });
+});
+
 describe('adaptBounds', () => {
   it('brackets the adaptive range', () => {
     const { bright, dark } = adaptBounds(params);
@@ -942,6 +1056,92 @@ describe('staticAdaptState', () => {
     const curve = buildToneCurve(maxParams, staticAdaptState(maxParams));
     expect(curve[0] as number).toBeGreaterThan(0);
     expect(curve[curve.length - 1] as number).toBeLessThan(1);
+  });
+});
+
+/**
+ * Stills are toned blind (their pixels are usually cross-origin and therefore
+ * unreadable), so the only guarantee available is the direction of the effect:
+ * whatever the picture turns out to contain, the curve must not make it
+ * brighter. That is the property worth pinning, because the one part of the
+ * tone map that *would* brighten it — the shadow lift — is also the part every
+ * other caller of this module wants.
+ */
+describe('imageAdaptState', () => {
+  const strengths = [1, 20, 45, 60, 80, 100];
+
+  it('never brightens any input level, at any strength', () => {
+    for (const strength of strengths) {
+      const p = mapVideoStrength(strength);
+      const curve = buildToneCurve(p, imageAdaptState(p), 65);
+      curve.forEach((value, index) => {
+        expect(value).toBeLessThanOrEqual(index / (curve.length - 1) + 1e-9);
+      });
+    }
+  });
+
+  it('keeps black at black and pulls white down', () => {
+    const state = imageAdaptState(params);
+    const curve = buildToneCurve(params, state);
+    expect(curve[0]).toBe(0);
+    expect(curve[curve.length - 1] as number).toBeLessThan(0.85);
+  });
+
+  it('is a true bypass at strength 0, like everything else here', () => {
+    const off = mapVideoStrength(0);
+    const curve = buildToneCurve(off, imageAdaptState(off), 9);
+    curve.forEach((value, index) => expect(value).toBeCloseTo(index / 8, 6));
+  });
+
+  it('dims harder as the slider goes up', () => {
+    const white = (strength: number): number => {
+      const p = mapVideoStrength(strength);
+      const curve = buildToneCurve(p, imageAdaptState(p));
+      return curve[curve.length - 1] as number;
+    };
+    for (let i = 1; i < strengths.length; i++) {
+      expect(white(strengths[i] as number)).toBeLessThan(white(strengths[i - 1] as number));
+    }
+  });
+
+  it('sits half way to the exposure servo’s floor', () => {
+    for (const strength of strengths) {
+      const p = mapVideoStrength(strength);
+      expect(imageAdaptState(p).exposure).toBeCloseTo((1 + p.adapt.minExposure) / 2, 6);
+    }
+  });
+
+  it('leaves saturation alone, because it flattens nothing', () => {
+    // The saturation boost pays for the flattening the shadow gamma causes, and
+    // this curve has no shadow gamma. Applying it anyway would over-saturate
+    // every picture on the page.
+    for (const strength of strengths) {
+      const p = mapVideoStrength(strength);
+      expect(resolveCurve(p, imageAdaptState(p)).saturation).toBe(1);
+      expect(resolveCurve(p, imageAdaptState(p)).lift).toBe(0);
+    }
+  });
+
+  it('is fixed: nothing about it depends on history', () => {
+    const a = buildToneCurve(maxParams, imageAdaptState(maxParams));
+    const b = buildToneCurve(maxParams, imageAdaptState(maxParams));
+    expect(a).toEqual(b);
+    const state = imageAdaptState(maxParams);
+    expect(state.flash).toBe(0);
+    expect(state.histogram).toBeNull();
+    // Its own resting place: advancing it must be a no-op rather than a drift.
+    const advanced = advanceAdaptState(state, maxParams, 1);
+    expect(advanced.exposure).toBeCloseTo(state.exposure, 9);
+    expect(advanced.liftScale).toBeCloseTo(0, 9);
+    expect(advanced.rollScale).toBeCloseTo(1, 9);
+  });
+
+  it('never brightens through the CSS fallback either', () => {
+    // The css-basic path is a two-point fit rather than the real curve, so it
+    // can disagree with it — but not about the direction.
+    const css = cssApproxFilter(params, imageAdaptState(params));
+    const brightness = Number(/brightness\(([\d.]+)\)/.exec(css)?.[1]);
+    expect(brightness).toBeLessThanOrEqual(1);
   });
 });
 

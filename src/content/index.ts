@@ -35,6 +35,7 @@ import { debug } from '../core/log';
 import { MediaRegistry } from './media-registry';
 import { AudioEngine } from './audio-engine';
 import { VideoEngine } from './video-engine';
+import { ImageEngine } from './image-engine';
 import { LightSensor } from './light-sensor';
 import { StatusReporter } from './status-reporter';
 
@@ -98,6 +99,9 @@ function main(): void {
 
   const audio = new AudioEngine(pageOrigin(), () => reporter.schedule());
   const video = new VideoEngine(document, () => reporter.schedule());
+  // Stills are not media elements, so the registry never sees them: the image
+  // engine works by selector and needs no discovery. See `image-engine.ts`.
+  const images = new ImageEngine(document, () => reporter.schedule());
 
   const registry = new MediaRegistry({
     onAttach: (element) => {
@@ -122,6 +126,7 @@ function main(): void {
   const snapshot = (): Omit<FrameStatus, 'frameId'> => {
     const audioStatus = audio.getStatus();
     const videoStatus = video.getStatus();
+    const imageStatus = images.getStatus();
     const siteDisabled = isSiteDisabled(settings.disabledSites, keys);
     return {
       at: Date.now(),
@@ -149,10 +154,12 @@ function main(): void {
         elements: videoStatus.elements,
         technique: videoStatus.technique,
       },
+      images: { active: imageStatus.active, elements: imageStatus.elements },
       notes: [
         ...(siteDisabled && site ? [`Turned off for ${site}.`] : []),
         ...audioStatus.notes,
         ...videoStatus.notes,
+        ...imageStatus.notes,
       ],
     };
   };
@@ -201,6 +208,9 @@ function main(): void {
       site: musicSite,
     });
     video.setParams(params.video, gate.active && settings.video);
+    // The picture slider drives both, but the two switches are independent: see
+    // `Settings.images`.
+    images.setParams(params.video, gate.active && settings.images);
     syncSensor();
     scheduleRecheck(now);
     reporter.schedule();
@@ -290,6 +300,7 @@ function main(): void {
       if (recheckTimer) clearTimeout(recheckTimer);
       audio.destroy();
       video.destroy();
+      images.destroy();
       reporter.stop();
     },
     { once: true },

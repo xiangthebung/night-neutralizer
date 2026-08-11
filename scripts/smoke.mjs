@@ -9,6 +9,7 @@
  *
  *   - the content script is injected;
  *   - <video> elements are marked and carry the SVG filter;
+ *   - <img> elements carry a separate, non-brightening curve of their own;
  *   - the tone curve changes as the scene changes (i.e. it really is adaptive);
  *   - the audio graph engages for a playing element;
  *   - status reaches the service worker;
@@ -658,6 +659,7 @@ async function main() {
         videoStrength: 45,
         audio: true,
         video: true,
+        images: true,
         nightEq: false,
         disabledSites: [],
         nightOnly: false,
@@ -794,6 +796,58 @@ async function main() {
       samples.size > 1,
       `${samples.size} distinct curves in 6 s`,
     );
+
+    /* -------- still images -------- */
+    // Stills are toned blind, so the assertions are about direction rather than
+    // about tracking anything: the curve must reach the `<img>`, and it must
+    // never be able to make a picture brighter than it arrived.
+    const imageFilter = await waitFor('image filter installed', () =>
+      page.eval(
+        `(() => {
+           const def = document.getElementById('nn-image-tone-curve');
+           const style = document.getElementById('nn-image-tone-style');
+           const img = document.getElementById('still');
+           if (!def || !style || !img) return false;
+           return {
+             rule: style.textContent,
+             computed: getComputedStyle(img).filter,
+             table: def.querySelector('feFuncR')?.getAttribute('tableValues') ?? '',
+             saturate: def.querySelector('feColorMatrix')?.getAttribute('values') ?? '',
+           };
+         })()`,
+      ),
+    );
+    check(
+      'still images carry a tone curve of their own',
+      imageFilter &&
+        imageFilter.rule.startsWith('img{filter:') &&
+        imageFilter.computed.includes('url('),
+      `${imageFilter?.rule} -> ${imageFilter?.computed}`,
+    );
+
+    const imageTable = String(imageFilter?.table ?? '')
+      .split(' ')
+      .map(Number);
+    const imageDarkensOnly =
+      imageTable.length === 33 &&
+      imageTable.every((v, i) => Number.isFinite(v) && v <= i / 32 + 1e-6);
+    check(
+      'the still-image curve only ever darkens, and pulls white down',
+      imageDarkensOnly && (imageTable.at(-1) ?? 1) < 0.95 && imageTable[0] === 0,
+      `black=${imageTable[0]} white=${imageTable.at(-1)} saturate=${imageFilter?.saturate}`,
+    );
+
+    await writeSettings({ images: false });
+    const imagesOff = await waitFor('image filter removed', () =>
+      page.eval(`!document.getElementById('nn-image-tone-style')`),
+    );
+    check('turning images off removes their rule without a reload', imagesOff === true);
+
+    await writeSettings({ images: true });
+    const imagesBack = await waitFor('image filter restored', () =>
+      page.eval(`Boolean(document.getElementById('nn-image-tone-style'))`),
+    );
+    check('turning images back on restores the rule live', imagesBack === true);
 
     /* -------- cost of one analysis sample -------- */
     const sampleCost = await page.eval(
@@ -1022,6 +1076,94 @@ async function main() {
        })()`,
     );
     await sleep(500);
+
+    /* -------- the curve keeps up with the frame rate -------- */
+    // Smoothness is update *cadence*, not adaptation maths: a curve that only
+    // reaches the compositor every other frame holds a stale LUT half the time
+    // however good the state behind it is. Two things used to drop frames here
+    // — a 30 ms push throttle (invisible below 33 fps, halving the rate above
+    // it) and a frame-skip budget with no fixed point — so this measures the
+    // observable both of them govern: LUT writes per presented video frame.
+    await setStrength(45);
+    await sleep(800);
+    const cadence = await page.eval(`(async () => {
+      const func = document.querySelector('#nn-tone-curve feFuncR');
+      const video = document.getElementById('scene');
+      if (!func || !video) return null;
+      const lut = [];
+      const steps = [];
+      const read = () => (func.getAttribute('tableValues') ?? '').split(' ').map(Number);
+      let last = func.getAttribute('tableValues');
+      let lastValues = read();
+      const observer = new MutationObserver(() => {
+        const value = func.getAttribute('tableValues');
+        if (value === last) return;
+        last = value;
+        // How big a jump each write asks the screen to make: the observable
+        // behind "I can see it stepping".
+        const values = read();
+        if (values.length === lastValues.length) {
+          let worst = 0;
+          for (let i = 0; i < values.length; i++) {
+            worst = Math.max(worst, Math.abs(values[i] - lastValues[i]));
+          }
+          steps.push(worst);
+        }
+        lastValues = values;
+        lut.push(performance.now());
+      });
+      observer.observe(func, { attributes: true, attributeFilter: ['tableValues'] });
+      const frames = [];
+      let handle = video.requestVideoFrameCallback(function step() {
+        frames.push(performance.now());
+        handle = video.requestVideoFrameCallback(step);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      observer.disconnect();
+      video.cancelVideoFrameCallback(handle);
+      if (lut.length < 2 || frames.length < 2) return null;
+      const gaps = lut.slice(1).map((t, i) => t - lut[i]).sort((a, b) => a - b);
+      // A cut is meant to arrive whole and is masked by the cut itself, so it
+      // is not a step anyone can see. Split the two populations rather than
+      // taking a percentile over both: measured here they differ by 60x
+      // (~1 8-bit level of smooth motion against ~85 at a cut), so where the
+      // line goes between them makes no difference to the verdict.
+      const smooth = steps.filter((s) => s <= 8 / 255).sort((a, b) => a - b);
+      return {
+        fps: frames.length / ((frames.at(-1) - frames[0]) / 1000),
+        hz: lut.length / ((lut.at(-1) - lut[0]) / 1000),
+        medianGap: gaps[Math.floor(gaps.length / 2)],
+        frameGap: (frames.at(-1) - frames[0]) / (frames.length - 1),
+        smoothMedian: smooth[Math.floor(smooth.length / 2)] ?? 0,
+        smoothMax: smooth.at(-1) ?? 0,
+        cuts: steps.length - smooth.length,
+      };
+    })()`);
+    check(
+      'the tone curve reaches the compositor on every presented frame',
+      cadence !== null && cadence.hz > cadence.fps * 0.9,
+      cadence
+        ? `${cadence.hz.toFixed(1)} LUT updates/s against ${cadence.fps.toFixed(1)} fps ` +
+          `(median gap ${cadence.medianGap.toFixed(1)} ms vs ${cadence.frameGap.toFixed(1)} ms per frame)`
+        : 'could not measure',
+    );
+    // Rate alone does not bound how far each write moves the picture, and it is
+    // the size of the increment that gets noticed. The pair of checks together
+    // is the property: often enough, and small enough each time. 1/255 is one
+    // 8-bit output level — the finest step the compositor can render at all —
+    // so a couple of levels is the floor worth aiming at, not a slack budget.
+    // This is what pinning the stride to 4 used to violate: 3.4 levels a jump,
+    // because the state only advanced on the frames that were analysed.
+    check(
+      'no single curve update is large enough to read as a step',
+      cadence !== null && cadence.smoothMax < 3 / 255,
+      cadence
+        ? `largest smooth update ${cadence.smoothMax.toFixed(5)} ` +
+          `(${(cadence.smoothMax * 255).toFixed(2)} of one 8-bit level), ` +
+          `median ${(cadence.smoothMedian * 255).toFixed(2)}, ${cadence.cuts} cut snaps excluded`
+        : 'could not measure',
+    );
+
     /* -------- cost of per-frame analysis, measured -------- */
     await page.send('Performance.enable').catch(() => {});
     const scriptSeconds = async () => {
@@ -1224,6 +1366,11 @@ async function main() {
       return marked === 0;
     });
     check('strength 0 removes the video filter without a reload', bypassedVideo === true);
+
+    const bypassedImages = await waitFor('bypassed images', () =>
+      page.eval(`!document.getElementById('nn-image-tone-style')`),
+    );
+    check('strength 0 leaves images alone too', bypassedImages === true);
 
     const offStatus = await awaitStatus((s) => s.audio.state === 'off' && s.video.mode === 'off');
     check(
@@ -1484,9 +1631,10 @@ async function main() {
           master: document.getElementById('master').checked,
           audio: document.getElementById('audio').checked,
           video: document.getElementById('video').checked,
+          images: document.getElementById('images').checked,
           nightEq: document.getElementById('night-eq').checked,
           audioStatus: document.getElementById('audio-status').textContent,
-          videoStatus: document.getElementById('video-status').textContent,
+          pictureStatus: document.getElementById('picture-status').textContent,
           shortcutShown: !document.getElementById('shortcut').hidden,
           shortcutKeys: document.getElementById('shortcut-keys').textContent,
           splitShown: !document.getElementById('split').hidden,

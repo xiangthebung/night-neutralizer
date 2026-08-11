@@ -53,6 +53,7 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
       mediaElements: 0,
       audio: { state: 'off', processed: 0, skipped: 0 },
       video: { mode: 'off', elements: 0, technique: 'none' },
+      images: { active: false, elements: 0 },
       notes: [],
       stale: true,
     };
@@ -62,6 +63,10 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
   let processed = 0;
   let skipped = 0;
   let videoElements = 0;
+  let imageElements = 0;
+  // One frame filtering its images is enough to say the tab's pictures are
+  // being treated, the same way one frame doing work decides the gate below.
+  let imagesActive = false;
   let newest = 0;
   // The top frame is authoritative for the site: sub-frames report the same
   // top-level host, but only if `ancestorOrigins` was available to them.
@@ -85,6 +90,11 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
     processed += frame.audio.processed;
     skipped += frame.audio.skipped;
     videoElements += frame.video.elements;
+    // Optional access on a required field: a report written by the previous
+    // version of the content script can still be sitting in session storage
+    // right after an update, and it has no `images` at all.
+    imageElements += frame.images?.elements ?? 0;
+    if (frame.images?.active) imagesActive = true;
     newest = Math.max(newest, frame.at);
     audioStates.push(frame.audio.state);
     videoModes.push(frame.video.mode);
@@ -126,6 +136,7 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
       elements: videoElements,
       technique: pick(techniques, ['svg-tone-curve', 'css-basic', 'none'], 'none'),
     },
+    images: { active: imagesActive, elements: imageElements },
     notes: [...notes],
     stale: now - newest > STATUS_STALE_MS,
   };

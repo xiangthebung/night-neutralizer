@@ -18,18 +18,33 @@
  * The adaptive part lives in `video-engine.ts`: it measures frame luminance and
  * rewrites the LUT, so the curve tracks the content. Updating `tableValues` is
  * a single attribute write.
+ *
+ * One instance owns one filter definition, one stylesheet and one selector, so
+ * `image-engine.ts` can run a second, independent instance over `<img>` with a
+ * curve of its own. Sharing a single definition between the two would have
+ * meant stills breathing along with whatever the video on the page was doing.
  */
 import { warn } from '../core/log';
 
 export const TONE_ATTRIBUTE = 'data-nn-tone';
-const FILTER_ID = 'nn-tone-curve';
-const STYLE_ID = 'nn-tone-style';
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 export type ToneTechnique = 'svg-tone-curve' | 'css-basic' | 'none';
 
+export interface ToneFilterOptions {
+  /** `id` of the `<filter>` element, and therefore what the CSS refers to. */
+  filterId?: string;
+  /** `id` of the injected `<style>` element. */
+  styleId?: string;
+  /** What the injected rule applies the filter to. */
+  selector?: string;
+}
+
 export class ToneFilter {
   private readonly doc: Document;
+  private readonly filterId: string;
+  private readonly styleId: string;
+  private readonly selector: string;
   private svgHost: SVGSVGElement | null = null;
   private funcs: Element[] = [];
   private saturateNode: Element | null = null;
@@ -42,8 +57,11 @@ export class ToneFilter {
   private fallbackCss = 'none';
   private destroyed = false;
 
-  constructor(doc: Document = document) {
+  constructor(doc: Document = document, options: ToneFilterOptions = {}) {
     this.doc = doc;
+    this.filterId = options.filterId ?? 'nn-tone-curve';
+    this.styleId = options.styleId ?? 'nn-tone-style';
+    this.selector = options.selector ?? `video[${TONE_ATTRIBUTE}="1"]`;
   }
 
   getTechnique(): ToneTechnique {
@@ -76,7 +94,7 @@ export class ToneFilter {
 
     if (!this.styleNode || !this.styleNode.isConnected) {
       this.styleNode = this.doc.createElement('style');
-      this.styleNode.id = STYLE_ID;
+      this.styleNode.id = this.styleId;
       (this.doc.head ?? parent).appendChild(this.styleNode);
       this.lastRule = '';
       this.writeRule();
@@ -99,7 +117,7 @@ export class ToneFilter {
 
       const defs = this.doc.createElementNS(SVG_NS, 'defs');
       const filter = this.doc.createElementNS(SVG_NS, 'filter');
-      filter.setAttribute('id', FILTER_ID);
+      filter.setAttribute('id', this.filterId);
       // sRGB is essential: the default linearRGB space would shift colours.
       filter.setAttribute('color-interpolation-filters', 'sRGB');
       filter.setAttribute('x', '0%');
@@ -147,18 +165,18 @@ export class ToneFilter {
    * kill the filter, so in that case we spell out the absolute document URL.
    */
   private filterReference(): string {
-    if (!this.doc.querySelector('base[href]')) return `url("#${FILTER_ID}")`;
+    if (!this.doc.querySelector('base[href]')) return `url("#${this.filterId}")`;
     const href = this.doc.defaultView?.location?.href ?? '';
     const base = href.split('#')[0] ?? '';
-    if (!base) return `url("#${FILTER_ID}")`;
-    return `url("${base.replace(/"/g, '%22')}#${FILTER_ID}")`;
+    if (!base) return `url("#${this.filterId}")`;
+    return `url("${base.replace(/"/g, '%22')}#${this.filterId}")`;
   }
 
   private writeRule(): void {
     if (!this.styleNode) return;
     const value =
       this.technique === 'svg-tone-curve' ? this.filterReference() : this.fallbackCss;
-    const rule = `video[${TONE_ATTRIBUTE}="1"]{filter:${value} !important;}`;
+    const rule = `${this.selector}{filter:${value} !important;}`;
     if (rule === this.lastRule) return;
     this.lastRule = rule;
     this.styleNode.textContent = rule;

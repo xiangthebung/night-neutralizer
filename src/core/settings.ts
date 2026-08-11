@@ -50,6 +50,7 @@ export function sanitizeSettings(raw: unknown): Settings {
     videoStrength: level(source.videoStrength, strength),
     audio: bool(source.audio, DEFAULT_SETTINGS.audio),
     video: bool(source.video, DEFAULT_SETTINGS.video),
+    images: bool(source.images, DEFAULT_SETTINGS.images),
     nightEq: bool(source.nightEq, DEFAULT_SETTINGS.nightEq),
     disabledSites: sanitizeDisabledSites(source.disabledSites),
     nightOnly: bool(source.nightOnly, DEFAULT_SETTINGS.nightOnly),
@@ -70,6 +71,7 @@ export function settingsEqual(a: Settings, b: Settings): boolean {
     a.videoStrength === b.videoStrength &&
     a.audio === b.audio &&
     a.video === b.video &&
+    a.images === b.images &&
     a.nightEq === b.nightEq &&
     a.nightOnly === b.nightOnly &&
     a.nightStart === b.nightStart &&

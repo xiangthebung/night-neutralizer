@@ -6,6 +6,124 @@ follow [semver](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Still images are tone mapped too.** A bright photograph at 1 a.m. is exactly
+  as unpleasant as a bright frame of video, and until now the extension dimmed
+  one and not the other. `<img>` now goes through the same compositor path — a
+  second `feComponentTransfer` filter, referenced by one `img { filter: … }`
+  rule — with a new **Images** toggle beside Video, on by default and driven by
+  the picture slider (0 is a bypass there too).
+
+  The popup pays nothing for it. Chrome caps a popup at 600 px and the layout
+  had 6 px of slack in its tallest state, so Video and Images share one row (they
+  are the two halves of the same path, and the tone-curve graph above explains
+  both), and the status card reports the picture in one line covering both
+  halves — `Picture: adaptive tone mapping · 42 images toned` — instead of
+  repeating the master switch, the exclusion list and the night gate on a second
+  line. Measured before and after: identical height in both the linked and the
+  split state.
+
+  The curve is deliberately *not* the video one. Stills are toned blind, and
+  that is a constraint rather than a preference: drawing a cross-origin image
+  into a canvas taints it, most pictures on a page are served from a CDN without
+  CORS headers, and the extension has no host permissions and fetches nothing,
+  so their pixels cannot be read at all. Measuring only the minority that can be
+  read would tone two photographs sitting side by side differently depending on
+  which host happened to serve them — a worse artefact than treating both the
+  same.
+
+  So the image curve is the half of the tone map that is safe without knowing
+  what it is looking at: a fixed exposure reduction (half way from unity to the
+  exposure servo's floor, so it still scales with the slider) plus the highlight
+  shoulder, with the shadow lift and its gamma held at zero. The lift is the
+  part that must not run blind — it brightens everything below the knee, so on a
+  page of photographs it would *increase* the light coming off the screen, which
+  is the opposite of the point. The shoulder has no such failure mode: it only
+  darkens, and only above the knee, so on a dark picture it does nothing at all.
+  The property is pinned by test rather than by argument: no input level, at any
+  strength, may come out brighter than it went in — in the unit suite, and again
+  on the LUT the smoke test reads out of real Chrome (black 0.000, white 0.810
+  at the default strength).
+
+  There is no element discovery either, and that is what keeps it cheap: the
+  rule is a bare `img` selector rather than a marked attribute, so pictures added
+  by infinite scroll, lazy loading or an SPA route change are covered by the CSS
+  engine with no MutationObserver, no per-element bookkeeping and no layout
+  reads. A 2 s timer does the same upkeep the video engine does, and switching
+  the toggle off removes the stylesheet and the filter definition entirely.
+
+  Two consequences worth knowing, both in the README's limitations: the rule is
+  `!important`, so a site that dims or greys its own pictures in CSS has that
+  overridden while the toggle is on; and only `<img>` is covered — CSS
+  `background-image`, SVG artwork and canvas drawings have no element to attach
+  a filter to without restyling the page's own boxes.
+
+### Fixed
+
+- **The tone curve now reaches the compositor on every presented frame.** Two
+  independent frame-droppers meant the LUT often updated at a fraction of the
+  video's rate, which reads as judder regardless of how good the adaptation
+  behind it is — a stale curve is a stale curve. Measured on the smoke clip:
+  30.3 LUT updates/s against 30.3 fps, median gap 33.3 ms against 33.3 ms per
+  frame. Main-thread cost is unchanged at 1.9–2.3% of one core.
+
+  - The 30 ms minimum gap between LUT writes is gone (now a 5 ms backstop that
+    cannot bite below 200 Hz). It was invisible at 30 fps, where frames arrive
+    33.3 ms apart, and dropped every other frame at 60 fps, where they arrive
+    16.7 ms apart — so the curve was one frame stale half the time on exactly
+    the content most likely to show it. Confirmed by scaling the throttle to
+    60 ms on the 30 fps clip: updates halved to 15.4 Hz with gaps of exactly two
+    frame intervals. `requestVideoFrameCallback` already caps writes at one per
+    presented frame, and `ToneFilter.setCurve` already skips unchanged tables,
+    so the throttle was only ever able to remove useful updates.
+
+  - The frame-skip budget is now a duty cycle (cost per presented frame) rather
+    than the raw per-sample cost. Skipping frames does not make an individual
+    read-back cheaper, so the old test had no fixed point: one sample over the
+    line ratcheted the stride 1 → 2 → 4 → 8 and nothing could bring it back,
+    because the number being tested never changed. Any read-back above 1.2 ms —
+    ordinary for a 4K source — therefore pinned the analysis at ⅛ rate, 7.5 Hz
+    on 60 fps content, where a 2.4 ms read-back should skip one frame in two.
+    Confirmed by dropping the budget below the measured cost: gaps of exactly
+    eight frame intervals, with no recovery over four seconds.
+
+    The hysteresis band is `(budget/2, budget]`. Half-open matters: with both
+    ends open, a cost landing on a boundary is stable at two strides at once, so
+    the settled rate depends on the order it got there and a video can sit a
+    step coarser than it needs to indefinitely. The decision is extracted as a
+    pure `nextFrameStride` and unit-tested, because in a browser its only
+    observable is the update rate and `performance.now()` is clamped to 100 µs
+    without cross-origin isolation — for a cheap read-back the measured cost is
+    mostly quantisation noise.
+
+- **Skipping a frame now skips the measurement, not the curve update.** The
+  adaptation state only advanced on frames the engine chose to *analyse*, so
+  whenever a read-back was too expensive to run every frame, the curve was also
+  only rewritten every `stride`-th frame — delivering a smooth ramp as a
+  staircase at `fps / stride`. Measured in Chrome with the stride pinned to 4:
+  7.8 LUT updates/s against 30.2 fps, each one moving the curve 3.4 8-bit levels
+  (95th percentile), which is plainly visible on any flat area.
+
+  Deciding where the curve should head needs pixels and is the expensive half;
+  moving it there is a few `exp` calls. They are now separate functions —
+  `updateAdaptState` re-aims the targets, `advanceAdaptState` integrates towards
+  them — and every presented frame runs the second one. At stride 4 the largest
+  smooth update is now 1.45 8-bit levels at 29.9 updates/s: the same figures as
+  at stride 1, so the analysis rate no longer costs anything in smoothness. It
+  still costs detection latency, which is what it was always meant to trade.
+
+  The rate gates that detect cuts and flashes now take the interval since the
+  last *analysed* frame rather than since the last update. Dividing a
+  four-frame change by one frame would read an ordinary pan as four times as
+  fast as it is and snap on it.
+
+- `npm run smoke` gained two checks: LUT writes keeping pace with presented
+  frames, and no single update moving the curve far enough to read as a step
+  (cut snaps excluded — those are meant to arrive whole, and are masked by the
+  cut itself). Between them they cover the observable all three of the above
+  govern and none was covered by.
+
 ### Changed
 
 - **The tone curve now snaps at a scene change instead of easing into it.** The
