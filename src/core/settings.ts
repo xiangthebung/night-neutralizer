@@ -27,6 +27,25 @@ export interface ChangeEmitterLike {
   removeListener(listener: ChangeListener): void;
 }
 
+/**
+ * Keys that used to exist and may still be sitting in a synced profile.
+ *
+ * They are read here and nowhere else, and never written back: every stored
+ * object is rebuilt by `sanitizeSettings`, so the first save after an update
+ * drops them. Keeping the shape declared rather than reaching into `unknown`
+ * is what makes it obvious when one of these can finally be deleted.
+ */
+interface LegacySettings {
+  /** One slider for both halves, before each group got its own. */
+  strength: number;
+  /** Whether the per-channel strengths were in use. */
+  linked: boolean;
+  /** Page-wide desaturation. Removed: the slider it rode never fit it. */
+  pageColor: boolean;
+  /** Now `darkMode`. */
+  pageDark: boolean;
+}
+
 /** Coerce anything (including malformed stored data) into valid settings. */
 export function sanitizeSettings(raw: unknown): Settings {
   const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Partial<Settings>;
@@ -37,46 +56,58 @@ export function sanitizeSettings(raw: unknown): Settings {
     return Number.isFinite(numeric) ? Math.round(clamp(numeric, 0, 100)) : fallback;
   };
 
-  const strength = level(source.strength, DEFAULT_SETTINGS.strength);
+  const legacy = source as Partial<LegacySettings>;
 
   return {
     enabled: bool(source.enabled, DEFAULT_SETTINGS.enabled),
-    strength,
-    linked: bool(source.linked, DEFAULT_SETTINGS.linked),
-    // Migration: settings written before the split existed only carry
-    // `strength`, so the per-channel values start from it. Someone who has been
-    // running at 70 and unlinks gets 70/70, not a surprise jump to the default.
-    audioStrength: level(source.audioStrength, strength),
-    videoStrength: level(source.videoStrength, strength),
+    disabledSites: sanitizeDisabledSites(source.disabledSites),
+
     audio: bool(source.audio, DEFAULT_SETTINGS.audio),
+    // Migration: one slider used to drive both halves, with `linked` saying
+    // whether the per-channel values were in use at all. Whichever way that
+    // install was running, its real position is `strength` when no per-channel
+    // value was ever written — so someone at 70 stays at 70 rather than
+    // dropping back to the default.
+    audioStrength: level(
+      source.audioStrength,
+      level(legacy.strength, DEFAULT_SETTINGS.audioStrength),
+    ),
+    nightEq: bool(source.nightEq, DEFAULT_SETTINGS.nightEq),
+    skipMusic: bool(source.skipMusic, DEFAULT_SETTINGS.skipMusic),
+
     video: bool(source.video, DEFAULT_SETTINGS.video),
     images: bool(source.images, DEFAULT_SETTINGS.images),
-    nightEq: bool(source.nightEq, DEFAULT_SETTINGS.nightEq),
-    disabledSites: sanitizeDisabledSites(source.disabledSites),
+    videoStrength: level(
+      source.videoStrength,
+      level(legacy.strength, DEFAULT_SETTINGS.videoStrength),
+    ),
+    // Was `pageDark` while it had a `pageColor` sibling to be told apart from.
+    // Defaults to false either way, so an install that predates it simply
+    // carries on as it was.
+    darkMode: bool(source.darkMode ?? legacy.pageDark, DEFAULT_SETTINGS.darkMode),
+
     nightOnly: bool(source.nightOnly, DEFAULT_SETTINGS.nightOnly),
     // `sanitizeClock` accepts minutes or "HH:MM", so a hand-edited storage value
     // works as well as one written by the popup.
     nightStart: sanitizeClock(source.nightStart, DEFAULT_SETTINGS.nightStart),
     nightEnd: sanitizeClock(source.nightEnd, DEFAULT_SETTINGS.nightEnd),
-    skipMusic: bool(source.skipMusic, DEFAULT_SETTINGS.skipMusic),
   };
 }
 
 export function settingsEqual(a: Settings, b: Settings): boolean {
   return (
     a.enabled === b.enabled &&
-    a.strength === b.strength &&
-    a.linked === b.linked &&
-    a.audioStrength === b.audioStrength &&
-    a.videoStrength === b.videoStrength &&
     a.audio === b.audio &&
+    a.audioStrength === b.audioStrength &&
+    a.nightEq === b.nightEq &&
+    a.skipMusic === b.skipMusic &&
     a.video === b.video &&
     a.images === b.images &&
-    a.nightEq === b.nightEq &&
+    a.videoStrength === b.videoStrength &&
+    a.darkMode === b.darkMode &&
     a.nightOnly === b.nightOnly &&
     a.nightStart === b.nightStart &&
     a.nightEnd === b.nightEnd &&
-    a.skipMusic === b.skipMusic &&
     a.disabledSites.length === b.disabledSites.length &&
     a.disabledSites.every((site, index) => site === b.disabledSites[index])
   );

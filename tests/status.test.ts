@@ -16,6 +16,7 @@ function frame(overrides: Partial<FrameStatus> = {}): FrameStatus {
     audio: { state: 'active', processed: 1, skipped: 0 },
     video: { mode: 'adaptive', elements: 1, technique: 'svg-tone-curve' },
     images: { active: true, elements: 3 },
+    page: { active: false, dark: 'off' },
     notes: [],
     ...overrides,
   };

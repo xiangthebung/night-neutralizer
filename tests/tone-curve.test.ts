@@ -8,6 +8,7 @@ import {
   adaptBounds,
   advanceAdaptState,
   applyCurve,
+  brightWhitePoint,
   buildToneCurve,
   computeSceneStats,
   createAdaptState,
@@ -22,6 +23,7 @@ import {
   toEncodedLight,
   toLinearLight,
   updateAdaptState,
+  whitePointCeiling,
   type SceneStats,
 } from '../src/core/tone-curve';
 import { mapVideoStrength } from '../src/core/strength';
@@ -605,6 +607,99 @@ describe('a bright scene inside a dark frame', () => {
   });
 });
 
+describe('dark-mode content (the lift must never add light)', () => {
+  const defaults = mapVideoStrength(45);
+
+  // A screencast of a dark-mode editor, as the 48x27 analysis canvas sees it:
+  // fine text is box-filtered into the background it sits on, so the frame is
+  // mostly flat dark fill with the light arriving through the text rows, a
+  // webcam inset and the tab bar. Encoded mean 0.25 — comfortably "dark" — while
+  // emitted light lands at 0.33 against a budget of 0.36.
+  const DARK_MODE_UI: Array<[number, number]> = [
+    [0.118, 0.5],
+    [0.29, 0.22],
+    [0.176, 0.1],
+    [0.627, 0.06],
+    [0.51, 0.07],
+    [0.804, 0.05],
+  ];
+
+  it('does not open the shadows of a frame already emitting its budget', () => {
+    // The reported failure: the extension lifted a dark-mode screencast because
+    // the mean said "night scene", and shipped 16.5% *more* light at the viewer
+    // than the source did. The old veto band sat above COMFORT_LIGHT rather than
+    // below it, so a frame at 0.333 against a 0.36 budget still got a lift of
+    // 0.63.
+    const stats = computeSceneStats(sceneFrame(DARK_MODE_UI));
+    expect(stats.light as number).toBeLessThan(COMFORT_LIGHT);
+    expect(stats.mean).toBeLessThan(defaults.adapt.targetLuma); // it does look dark
+
+    const state = settleOn(defaults, stats);
+    expect(state.liftScale).toBeLessThan(0.15);
+  });
+
+  it('leaves the flat background where the source put it, at every strength', () => {
+    // 0.118 is the editor background: 30/255 in the source. The old veto let it
+    // reach 46/255 at the default strength and 75/255 at the top of the slider,
+    // which is the grey wash in the report. There is no detail in a flat fill to
+    // recover, so the only thing that lift ever bought was emitted light.
+    const stats = computeSceneStats(sceneFrame(DARK_MODE_UI));
+    for (const strength of [1, 20, 45, 70, 100]) {
+      const params = mapVideoStrength(strength);
+      const resolved = resolveCurve(params, settleOn(params, stats));
+      expect(applyCurve(resolved, 0.118) * 255).toBeLessThan(40);
+    }
+  });
+
+  it('stops the lift from being what drives this frame’s light', () => {
+    // Measured against the same curve with the lift taken out, so this isolates
+    // the correction the veto governs from the shoulder and the slope
+    // allocation, which are doing their own (opposite) work on the same frame.
+    // The old veto let the lift add up to 29% on this scene; it is now bounded
+    // by single digits across the whole slider.
+    const stats = computeSceneStats(sceneFrame(DARK_MODE_UI));
+    for (const strength of [1, 20, 45, 70, 100]) {
+      const params = mapVideoStrength(strength);
+      const state = settleOn(params, stats);
+      const lifted = litAfter(stats, buildToneCurve(params, state, 65));
+      const flat = litAfter(stats, buildToneCurve(params, { ...state, liftScale: 0 }, 65));
+      expect(lifted).toBeLessThan(flat * 1.08);
+    }
+  });
+
+  it('still opens a night scene that has the budget to spare', () => {
+    // The other half of the bargain. This scene emits 0.23 against the same
+    // budget, so it keeps the full lift it had before the veto was rebased —
+    // the fix must cost genuinely dark content exactly nothing.
+    const state = settleOn(defaults, computeSceneStats(sceneFrame(NIGHT)));
+    expect(state.liftScale).toBeGreaterThan(DARK_LIFT_FLOOR);
+  });
+
+  it('fades the lift out as the frame approaches the budget', () => {
+    // Monotone and continuous, so there is no pair of near-identical frames one
+    // of which is lifted and one of which is not.
+    const lifts = [0.1, 0.18, 0.26, 0.34, 0.42].map((share) => {
+      // A flat dark field plus a bright patch: same shape, more emitted light.
+      const stats = computeSceneStats(
+        sceneFrame([
+          [0.06, 1 - share],
+          [0.85, share],
+        ]),
+      );
+      return { light: stats.light as number, lift: settleOn(defaults, stats).liftScale };
+    });
+    for (let i = 1; i < lifts.length; i++) {
+      expect((lifts[i] as { light: number }).light).toBeGreaterThan(
+        (lifts[i - 1] as { light: number }).light,
+      );
+      expect((lifts[i] as { lift: number }).lift).toBeLessThanOrEqual(
+        (lifts[i - 1] as { lift: number }).lift + 1e-9,
+      );
+    }
+    expect((lifts.at(-1) as { lift: number }).lift).toBeLessThan(0.01);
+  });
+});
+
 describe('slope allocation', () => {
   const defaults = mapVideoStrength(45);
   const stats = computeSceneStats(sceneFrame(DASHCAM));
@@ -681,12 +776,25 @@ describe('slope allocation', () => {
     const spiked = settleOn(defaults, scene);
     const allocated = buildToneCurve(defaults, spiked, 65);
     const plain = buildToneCurve(defaults, { ...spiked, histogram: null }, 65);
+
+    // The bound that holds is on the *spread* between levels, not on any one
+    // level's ratio to the unallocated curve. A histogram this concentrated pins
+    // every interval against one bound or the other — here 11 at the ceiling and
+    // 53 at the floor — so the bounded allocation no longer sums to the range the
+    // curve is supposed to have, and `redistribute` closes the gap by scaling all
+    // of them uniformly. That is the documented trade (the endpoint wins over the
+    // bounds), and it multiplies the individual ratios by a common factor while
+    // leaving the spread between them exactly where the bounds put it. So the
+    // scale-invariant form is what actually guards against equalisation: no level
+    // may claim more than `MAX/MIN` times the treatment of any other.
+    const ratios: number[] = [];
     for (let i = 0; i < allocated.length - 1; i++) {
       const was = (plain[i + 1] as number) - (plain[i] as number);
       const now = (allocated[i + 1] as number) - (allocated[i] as number);
-      expect(now).toBeGreaterThanOrEqual(was * 0.55 - 1e-9);
-      expect(now).toBeLessThanOrEqual(was * 1.8 + 1e-9);
+      if (was > 1e-12) ratios.push(now / was);
     }
+    expect(ratios.length).toBeGreaterThan(32);
+    expect(Math.max(...ratios) / Math.min(...ratios)).toBeLessThanOrEqual(1.8 / 0.55 + 1e-9);
     // ...and the cap must not cost the frame any overall range: what is taken
     // from one level has to be given to another.
     expect(allocated.at(-1) as number).toBeCloseTo(plain.at(-1) as number, 6);
@@ -993,6 +1101,155 @@ describe('per-frame advance', () => {
   });
 });
 
+describe('white-point ceiling', () => {
+  // Everything else in this module answers the frame in front of it, which is
+  // the wrong shape for a cut: the bright frame is on screen before anything has
+  // measured it. Detection costs a frame at best, `frameStride` frames when the
+  // sampler has backed off, and a cut that only partly registers earns only
+  // partial snap credit — so the reactive path has no worst case. The ceiling is
+  // the standing limit that covers all of it, armed from where the viewer has
+  // been rather than from what just arrived.
+  const p = mapVideoStrength(45);
+  const NIGHT_STATS = computeSceneStats(sceneFrame(NIGHT));
+  const WHITE_STATS = computeSceneStats(flatFrame(0.98, 4096));
+  const peakOf = (state: ReturnType<typeof createAdaptState>) =>
+    applyCurve(resolveCurve(p, state), 1);
+
+  it('states the ceiling in closed form without drifting from the general path', () => {
+    // `brightWhitePoint` is hand-rolled arithmetic so it can be called every
+    // frame without running `solveKneeScale`, and so `resolveCurve` can consume
+    // it without recursing. The bright bound carries `darkAdapt: 0`, so the
+    // general path leaves it uncapped — which makes this a direct comparison of
+    // the shortcut against the code it is a shortcut for.
+    for (let strength = 0; strength <= 100; strength += 5) {
+      const params = mapVideoStrength(strength);
+      expect(brightWhitePoint(params)).toBeCloseTo(
+        resolveCurve(params, adaptBounds(params).bright).whitePoint,
+        12,
+      );
+    }
+  });
+
+  it('never lets the peak rise across a cut, however late the cut is noticed', () => {
+    // The invariant the whole change exists for, stated over the worst case:
+    // eight presented frames of a white scene carrying a night scene's
+    // measurements. `advanceAdaptState` is exactly what the engine runs on a
+    // frame it chose not to analyse, so this is the stride-8 path verbatim.
+    const settled = settleOn(p, NIGHT_STATS);
+    const before = peakOf(settled);
+
+    let blind = settled;
+    for (let i = 0; i < 8; i++) {
+      blind = advanceAdaptState(blind, p, 1 / 60);
+      expect(peakOf(blind)).toBeLessThanOrEqual(before + 1e-9);
+    }
+
+    let after = updateAdaptState(blind, WHITE_STATS, p, 1 / 60, 8 / 60);
+    expect(peakOf(after)).toBeLessThanOrEqual(before + 1e-9);
+    for (let i = 0; i < 600; i++) after = updateAdaptState(after, WHITE_STATS, p, 1 / 60);
+    expect(peakOf(after)).toBeLessThanOrEqual(before + 1e-9);
+  });
+
+  it('holds an unmeasured white frame near the bright-scene white point', () => {
+    // The magnitude, pinned. Without the ceiling a night scene sat at a white
+    // point above 0.9 — full exposure, and a shoulder that can only soften the
+    // top of a range nothing had lowered yet — so an unnoticed white frame came
+    // through at 0.9 before settling near 0.71. That gap was the flash.
+    const settled = settleOn(p, NIGHT_STATS);
+    expect(settled.darkAdapt).toBeGreaterThan(0.95);
+
+    const capped = peakOf(settled);
+    const uncapped = applyCurve(resolveCurve(p, { ...settled, darkAdapt: 0 }), 1);
+    expect(uncapped).toBeGreaterThan(0.9);
+    expect(capped).toBeLessThan(brightWhitePoint(p) * 1.02);
+
+    // Stated in the units that matter for being flashed: the eye responds to
+    // emitted light, not to the encoded level, so the encoded 0.93 -> 0.72 here
+    // is 43% off the light a full-frame white actually puts on the screen. The
+    // figure tracks the slider, since the ceiling is the bright-scene white
+    // point and that is where the strength mapping already lives: 18% at 25,
+    // 43% at 45, 60% at 60, 79% at 100.
+    const reduction = 1 - toLinearLight(capped) / toLinearLight(uncapped);
+    expect(reduction).toBeGreaterThan(0.4);
+
+    const strong = mapVideoStrength(100);
+    let night = createAdaptState();
+    for (let i = 0; i < 300; i++) night = updateAdaptState(night, NIGHT_STATS, strong, 1 / 30);
+    const hard = 1 - toLinearLight(applyCurve(resolveCurve(strong, night), 1)) /
+      toLinearLight(applyCurve(resolveCurve(strong, { ...night, darkAdapt: 0 }), 1));
+    expect(hard).toBeGreaterThan(reduction);
+  });
+
+  it('does not release on the very cut it exists to cover', () => {
+    // A cut out of a night scene is precisely the moment the incoming frame
+    // stops reading as dark. Everything else snaps onto its target here, and
+    // snapping this one would drop the ceiling on the frame it was holding.
+    const night = settleOn(p, NIGHT_STATS);
+    const cut = updateAdaptState(night, WHITE_STATS, p, 1 / 60);
+    expect(cut.cut).toBe(1);
+    expect(cut.rollScale).toBeCloseTo(cut.targets.roll, 6);
+    expect(cut.targets.darkAdapt).toBe(0);
+    expect(cut.darkAdapt).toBeGreaterThan(0.95);
+  });
+
+  it('arms slowly and releases more slowly still', () => {
+    const dt = 1 / 60;
+    const cap = 60 * 60;
+
+    let arming = createAdaptState();
+    let armFrames = 0;
+    while (arming.darkAdapt < 0.63 && armFrames < cap) {
+      arming = updateAdaptState(arming, NIGHT_STATS, p, dt);
+      armFrames++;
+    }
+    let releasing = settleOn(p, NIGHT_STATS);
+    let releaseFrames = 0;
+    while (releasing.darkAdapt > 0.37 && releaseFrames < cap) {
+      releasing = updateAdaptState(releasing, WHITE_STATS, p, dt);
+      releaseFrames++;
+    }
+
+    expect(armFrames).toBeLessThan(cap);
+    expect(releaseFrames).toBeLessThan(cap);
+    // Seconds, not frames: anything on the order of a shot length would track
+    // the scene, which is the one thing this must not do.
+    expect(armFrames / 60).toBeGreaterThan(1);
+    expect(releaseFrames).toBeGreaterThan(armFrames);
+  });
+
+  it('does not arm on a normally exposed scene', () => {
+    // The identity-on-normal-content rule outranks the ceiling: a scene that is
+    // neither dark nor over the light budget gets an unmodified curve, and
+    // `whitePointCeiling` returning exactly 1 is what makes that a no-op rather
+    // than a small correction that happens to round away.
+    const normal = settleOn(p, computeSceneStats(flatFrame(0.4, 4096)));
+    expect(normal.darkAdapt).toBe(0);
+    expect(whitePointCeiling(p, normal)).toBe(1);
+    expect(applyCurve(resolveCurve(p, normal), 1)).toBeGreaterThan(0.85);
+  });
+
+  it('stays out of the modes that cannot measure a scene', () => {
+    // Static mode is DRM and tainted canvases; image mode is cross-origin
+    // stills. Neither can know whether the viewer is dark-adapted, and arming
+    // the ceiling blind would dim protected video below everything else at the
+    // same slider position.
+    for (const params of [mapVideoStrength(45), mapVideoStrength(100)]) {
+      for (const state of [staticAdaptState(params), imageAdaptState(params)]) {
+        expect(state.darkAdapt).toBe(0);
+        expect(whitePointCeiling(params, state)).toBe(1);
+      }
+    }
+  });
+
+  it('yields to the flash guard rather than overriding it', () => {
+    // The cap is a `min`, so a guard that has already pulled the white point
+    // below the ceiling keeps its own, lower answer.
+    const night = settleOn(p, NIGHT_STATS);
+    const flashing = { ...night, flash: 1 };
+    expect(peakOf(flashing)).toBeLessThan(peakOf(night));
+  });
+});
+
 describe('adaptBounds', () => {
   it('brackets the adaptive range', () => {
     const { bright, dark } = adaptBounds(params);
@@ -1017,15 +1274,22 @@ describe('adaptBounds', () => {
     expect(buildToneCurve(bypass, dark, 5)).toEqual(buildToneCurve(bypass, bright, 5));
   });
 
-  it('opens shadows more at the dark end and holds highlights more at the bright end', () => {
+  it('opens shadows more at the dark end and holds both ends to the same ceiling', () => {
     const p = mapVideoStrength(45);
     const { bright, dark } = adaptBounds(p);
     expect(applyCurve(resolveCurve(p, dark), 0.05)).toBeGreaterThan(
       applyCurve(resolveCurve(p, bright), 0.05),
     );
-    expect(applyCurve(resolveCurve(p, bright), 1)).toBeLessThan(
-      applyCurve(resolveCurve(p, dark), 1),
-    );
+    // The two ends of the adaptive range used to differ at the top, the dark one
+    // sitting higher because only exposure had brought the bright one down. That
+    // gap was the flash: a cut out of a night scene spent its first frames at the
+    // dark bound's white point before anything had measured them. The ceiling is
+    // set to the bright bound's settled white, so the range now meets at the top
+    // and no scene can put more light on screen than sustained bright content is
+    // already held to.
+    for (const state of [dark, bright]) {
+      expect(applyCurve(resolveCurve(p, state), 1)).toBeCloseTo(brightWhitePoint(p), 10);
+    }
   });
 });
 

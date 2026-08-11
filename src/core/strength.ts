@@ -270,25 +270,15 @@ export function mapStrength(strength: number, nightEq = false): ProcessingParams
   };
 }
 
-/** Strength that actually reaches the audio chain, honouring the link toggle. */
-export function audioStrengthOf(settings: Settings): number {
-  return settings.linked ? settings.strength : settings.audioStrength;
-}
-
-/** Strength that actually reaches the tone curve, honouring the link toggle. */
-export function videoStrengthOf(settings: Settings): number {
-  return settings.linked ? settings.strength : settings.videoStrength;
-}
-
 /**
  * The whole settings object in one call. Everything that drives the engines
- * goes through here, so the link toggle and the EQ switch cannot be honoured in
+ * goes through here, so the sound group's own switches cannot be honoured in
  * one place and forgotten in another.
  */
 export function mapSettings(settings: Settings): ProcessingParams {
   return {
-    audio: mapAudioStrength(audioStrengthOf(settings), settings.nightEq),
-    video: mapVideoStrength(videoStrengthOf(settings)),
+    audio: mapAudioStrength(settings.audioStrength, settings.nightEq),
+    video: mapVideoStrength(settings.videoStrength),
   };
 }
 

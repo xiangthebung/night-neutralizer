@@ -36,6 +36,7 @@ import { MediaRegistry } from './media-registry';
 import { AudioEngine } from './audio-engine';
 import { VideoEngine } from './video-engine';
 import { ImageEngine } from './image-engine';
+import { PageEngine } from './page-engine';
 import { LightSensor } from './light-sensor';
 import { StatusReporter } from './status-reporter';
 
@@ -102,6 +103,20 @@ function main(): void {
   // Stills are not media elements, so the registry never sees them: the image
   // engine works by selector and needs no discovery. See `image-engine.ts`.
   const images = new ImageEngine(document, () => reporter.schedule());
+  // The page around the media. Its verdict arrives asynchronously (it has to
+  // wait for a document to measure), and when it changes the media engines have
+  // to be told, because they are the ones that own the `filter` property on the
+  // elements that must not be inverted.
+  const page = new PageEngine(document, () => {
+    syncPageCompensation();
+    reporter.schedule();
+  });
+
+  const syncPageCompensation = (): void => {
+    const compensation = page.getCompensation();
+    video.setPageCompensation(compensation);
+    images.setPageCompensation(compensation);
+  };
 
   const registry = new MediaRegistry({
     onAttach: (element) => {
@@ -127,6 +142,7 @@ function main(): void {
     const audioStatus = audio.getStatus();
     const videoStatus = video.getStatus();
     const imageStatus = images.getStatus();
+    const pageStatus = page.getStatus();
     const siteDisabled = isSiteDisabled(settings.disabledSites, keys);
     return {
       at: Date.now(),
@@ -155,11 +171,13 @@ function main(): void {
         technique: videoStatus.technique,
       },
       images: { active: imageStatus.active, elements: imageStatus.elements },
+      page: { active: pageStatus.active, dark: pageStatus.dark },
       notes: [
         ...(siteDisabled && site ? [`Turned off for ${site}.`] : []),
         ...audioStatus.notes,
         ...videoStatus.notes,
         ...imageStatus.notes,
+        ...pageStatus.notes,
       ],
     };
   };
@@ -211,6 +229,10 @@ function main(): void {
     // The picture slider drives both, but the two switches are independent: see
     // `Settings.images`.
     images.setParams(params.video, gate.active && settings.images);
+    // Dark mode goes last of the three, because turning it on or off changes
+    // what the other two have to carry on their own rules.
+    page.setDarkMode(settings.darkMode, gate.active);
+    syncPageCompensation();
     syncSensor();
     scheduleRecheck(now);
     reporter.schedule();
@@ -276,7 +298,18 @@ function main(): void {
 
   // SPA navigation: players are often reused, but a rescan is cheap insurance.
   window.addEventListener('popstate', () => registry.scan(document), { passive: true });
-  window.addEventListener('pageshow', () => registry.scan(document), { passive: true });
+  // `persisted` means this is a page restored from the back/forward cache: the
+  // whole document and this closure were frozen at `pagehide` rather than torn
+  // down, so the gate (and therefore dark mode) has to be re-evaluated as if
+  // time had just passed, the same as a tab coming back from being hidden.
+  window.addEventListener(
+    'pageshow',
+    (event) => {
+      registry.scan(document);
+      if (event.persisted) applyGate();
+    },
+    { passive: true },
+  );
 
   // A hidden tab's timers are throttled and the sensor stops reporting, so the
   // clock can be well out of date by the time the tab comes back.
@@ -292,19 +325,23 @@ function main(): void {
     });
   }
 
-  window.addEventListener(
-    'pagehide',
-    () => {
-      registry.stop();
-      sensor.stop();
-      if (recheckTimer) clearTimeout(recheckTimer);
-      audio.destroy();
-      video.destroy();
-      images.destroy();
-      reporter.stop();
-    },
-    { once: true },
-  );
+  window.addEventListener('pagehide', (event) => {
+    // A page going into the back/forward cache is not going away: the browser
+    // freezes the document (and this closure) as-is and thaws it later via a
+    // `persisted` `pageshow`. Destroying the engines here would strip the
+    // dark-mode stylesheet from a page that is about to reappear unchanged, and
+    // `destroy()` is permanent, so nothing would ever bring it back. Only a real
+    // unload gets the full teardown.
+    if (event.persisted) return;
+    registry.stop();
+    sensor.stop();
+    if (recheckTimer) clearTimeout(recheckTimer);
+    audio.destroy();
+    video.destroy();
+    images.destroy();
+    page.destroy();
+    reporter.stop();
+  });
 
   const boot = (): void => {
     registry.start(document);

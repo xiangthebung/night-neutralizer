@@ -18,6 +18,15 @@
  * the video passes through untouched. The corrections are for the extremes;
  * applying them to content that needs none is what washes an image out.
  *
+ * On top of those three stages sits a fourth thing that is not a stage at all:
+ * a **white-point ceiling** (`whitePointCeiling`), a standing cap on the curve's
+ * output that is armed while the viewer is dark-adapted. Everything above is
+ * reactive, and reaction is the wrong shape for a cut — the bright frame reaches
+ * the screen before anything has measured it. The ceiling is the only part of
+ * this module that is already correct on a frame it has never seen, which is
+ * what bounds the transient a night scene cutting to daylight puts on the
+ * screen. See `whitePointCeiling` for why it does not wash out normal content.
+ *
  * Two things make the result read as "dimmer" rather than "flatter":
  *
  *  - **The drive signal is linear light.** `mean` averages gamma-encoded luma,
@@ -87,6 +96,8 @@ export interface AdaptTargets {
   exposure: number;
   lift: number;
   roll: number;
+  /** How dark-adapted the viewer is, 0..1; see {@link AdaptState.darkAdapt}. */
+  darkAdapt: number;
   /** Raw histogram of the last analysed frame, or null when frames carry none. */
   histogram: Float32Array | null;
 }
@@ -119,6 +130,17 @@ export interface AdaptState {
    * Exposed so the render loop can push the resulting curve immediately.
    */
   cut: number;
+  /**
+   * How dark-adapted the viewer is, 0..1, and therefore how far the white-point
+   * ceiling is armed. See {@link whitePointCeiling}.
+   *
+   * This is the one piece of state that must never be derived from the frame in
+   * front of us, because its whole job is to be already correct when that frame
+   * turns out to be a bright cut. It tracks `darkEngage` — the module's existing
+   * "this is a night scene" signal — through a pair of slow time constants, and
+   * `advanceAdaptState` deliberately exempts it from the cut snap.
+   */
+  darkAdapt: number;
 }
 
 export function createAdaptState(): AdaptState {
@@ -131,10 +153,11 @@ export function createAdaptState(): AdaptState {
     flash: 0,
     prevMean: 0,
     initialized: false,
-    targets: { exposure: 1, lift: 0, roll: 0, histogram: null },
+    targets: { exposure: 1, lift: 0, roll: 0, darkAdapt: 0, histogram: null },
     histogram: null,
     prevHistogram: null,
     cut: 0,
+    darkAdapt: 0,
   };
 }
 
@@ -155,10 +178,15 @@ export function staticAdaptState(params: VideoParams): AdaptState {
     initialized: true,
     // Its own resting place, so advancing it is a no-op rather than a slow
     // drift back to the identity curve.
-    targets: { exposure: 1, lift, roll, histogram: null },
+    targets: { exposure: 1, lift, roll, darkAdapt: 0, histogram: null },
     histogram: null,
     prevHistogram: null,
     cut: 0,
+    // Static mode never sees a pixel, so it cannot know whether the viewer is
+    // dark-adapted and does not arm the ceiling. The fixed curve is already the
+    // compromise struck for content that cannot be measured; capping it on top
+    // would dim protected video below everything else at the same setting.
+    darkAdapt: 0,
   };
 }
 
@@ -207,10 +235,13 @@ export function imageAdaptState(params: VideoParams): AdaptState {
     initialized: true,
     // Its own resting place: nothing advances this state, but a caller that
     // does must find it already where it belongs.
-    targets: { exposure, lift: 0, roll: 1, histogram: null },
+    targets: { exposure, lift: 0, roll: 1, darkAdapt: 0, histogram: null },
     histogram: null,
     prevHistogram: null,
     cut: 0,
+    // Stills do not cut, so there is no transient for a ceiling to cover, and
+    // an unmeasured picture gives nothing to arm it from.
+    darkAdapt: 0,
   };
 }
 
@@ -271,16 +302,32 @@ export const COMFORT_LIGHT = 0.36;
 /** How far over the light budget a frame must be to read as fully "bright". */
 const BRIGHT_NEED_FULL = 0.3;
 /**
- * Emitted light at which the shadow lift starts and finishes being vetoed.
+ * How far *under* the light budget a frame has to be for the shadow lift to
+ * engage in full, as a fraction of `COMFORT_LIGHT`.
  *
  * The lift is for night scenes. A frame can read dark by mean and still be
  * throwing light at the viewer — a dark car interior wrapped around a bright
- * windscreen is the case that motivated this — and opening its shadows makes it
- * brighter *and* flatter, which is the worst of both. Emitted light settles it:
- * whatever the mean says, a frame this bright is not a night scene.
+ * windscreen, or a screencast of a dark-mode editor, where half the frame is a
+ * flat dark background and the light arrives through the text — and opening its
+ * shadows makes it brighter *and* flatter, which is the worst of both. Emitted
+ * light settles it: whatever the mean says, a frame already delivering its
+ * budget is not a night scene.
+ *
+ * Measured against `COMFORT_LIGHT` rather than against constants of its own,
+ * because the budget is the only number here that means anything. The previous
+ * pair (0.34 and 0.46) put the veto band *above* it: the lift ran at full
+ * strength on a frame already at the budget and did not release until the frame
+ * was a quarter over it, which is how a dark-mode screencast — emitting 0.333
+ * against a budget of 0.36 — was given a lift of 0.62 and left the screen 19%
+ * brighter than it found it, for no detail in return: there is nothing in a flat
+ * dark fill to open up. The band belongs below the budget, not above.
+ *
+ * This is the mirror of `BRIGHT_NEED_FULL`: that one says how far over budget a
+ * frame must be before it is fully "bright", this one how far under before it is
+ * fully "dark". Between the two the lift fades out as the exposure servo fades
+ * in, so no frame is ever being opened up and dimmed at the same time.
  */
-const LIFT_VETO_START = 0.34;
-const LIFT_VETO_FULL = 0.46;
+const DARK_LIGHT_SPAN = 0.3;
 /** p90 luma below which highlights are not glare and the shoulder stays out. */
 const GLARE_START = 0.75;
 /** p90 luma that counts as fully blown highlights. */
@@ -296,6 +343,27 @@ const HIST_TAU = 0.5;
  */
 const LIFT_TAU = 1.2;
 const ROLL_TAU = 0.8;
+
+/**
+ * Time constants (s) for arming and releasing the white-point ceiling.
+ *
+ * Both are much longer than anything else here, and that is the point: the
+ * ceiling is the one correction that has to be *already in place* when a bright
+ * cut lands, so it cannot be allowed to track the scene. `advanceAdaptState`
+ * also exempts it from the cut snap, for the same reason.
+ *
+ * Release is the slower of the two, so leaving a dark scene relaxes the ceiling
+ * more gradually than entering one arms it. On genuinely bright content this
+ * costs nothing — the exposure servo pulls the white point below the ceiling
+ * within about a second anyway, so the cap stops binding long before it lifts.
+ * Where it is visible is a *normally* exposed scene shortly after a dark one,
+ * whose speculars take a few seconds to come back up. That is bounded: the
+ * ceiling only ever touches levels above `kneeStart`, and it rolls them off
+ * along the same C1-continuous shoulder as everything else rather than clipping
+ * them. If that recovery ever reads as pumping, this is the constant to raise.
+ */
+const DARK_ADAPT_TAU = 2.5;
+const DARK_ADAPT_RELEASE_TAU = 5;
 
 /**
  * Scene-change detection.
@@ -389,16 +457,27 @@ export function adaptBounds(params: VideoParams): { bright: AdaptState; dark: Ad
     prevHistogram: null,
     cut: 0,
   };
-  const bright = { exposure: params.adapt.minExposure, liftScale: 0, rollScale: 1 };
+  const bright = {
+    exposure: params.adapt.minExposure,
+    liftScale: 0,
+    rollScale: 1,
+    darkAdapt: 0,
+  };
   const dark = {
     exposure: params.adapt.maxExposure,
     liftScale: 1,
     rollScale: DARK_ROLL_FLOOR,
+    // A dark scene is by definition where the viewer is dark-adapted, so this
+    // bound carries the ceiling fully armed. It is what closes the two curves
+    // onto the same white point: the popup's shaded band is now a band in the
+    // shadows and a single point at the top, which is exactly the guarantee.
+    darkAdapt: 1,
   };
   const resting = (s: typeof bright): AdaptTargets => ({
     exposure: s.exposure,
     lift: s.liftScale,
     roll: s.rollScale,
+    darkAdapt: s.darkAdapt,
     histogram: null,
   });
   return {
@@ -520,11 +599,23 @@ export function advanceAdaptState(
   const ease = (current: number, target: number, tau: number): number =>
     lerp(approach(current, target, step, tau), target, cut);
 
+  // The ceiling's arming level is the one thing here that is *not* snapped onto
+  // its target by a cut, and the exclusion is the whole mechanism rather than an
+  // oversight. A cut out of a night scene is precisely the moment the incoming
+  // frame stops reading as dark, so snapping would release the ceiling on the
+  // very frame it exists to cover — and it would do so before anything else in
+  // the curve has had a chance to respond, since the snap is instantaneous and
+  // the frame is already on screen. Easing it, and easing it slowly, is what
+  // makes the protection a property of where the viewer has *been* rather than
+  // of what just arrived.
+  const darkTau = targets.darkAdapt > state.darkAdapt ? DARK_ADAPT_TAU : DARK_ADAPT_RELEASE_TAU;
+
   return {
     ...state,
     exposure: clamp(ease(state.exposure, targets.exposure, exposureTau), 0.2, 2),
     liftScale: clamp01(ease(state.liftScale, targets.lift, LIFT_TAU)),
     rollScale: clamp01(ease(state.rollScale, targets.roll, ROLL_TAU)),
+    darkAdapt: clamp01(approach(state.darkAdapt, targets.darkAdapt, step, darkTau)),
     flash: clamp01(approach(state.flash, 0, step, cfg.flashTau)),
     histogram: blendHistogram(state.histogram, targets.histogram, step, cut),
     cut,
@@ -648,15 +739,19 @@ export function updateAdaptState(
   const darkEngage = smoothstep(clamp01(darkNeed / DARK_ENGAGE_SPAN));
   const brightNeed = clamp01(1 - COMFORT_LIGHT / light);
   const brightEngage = smoothstep(clamp01(brightNeed / BRIGHT_NEED_FULL));
-  const liftVeto = smoothstep(
-    clamp01((light - LIFT_VETO_START) / (LIFT_VETO_FULL - LIFT_VETO_START)),
-  );
+  // How much room the frame has left under the budget, and therefore how much
+  // of the lift it has earned. A frame already emitting its budget has earned
+  // none of it, however dark the distribution says it looks.
+  const darkLightNeed = clamp01(1 - light / COMFORT_LIGHT);
+  const liftVeto = 1 - smoothstep(clamp01(darkLightNeed / DARK_LIGHT_SPAN));
 
   // --- shadow lift ---------------------------------------------------------
   // Crushed shadow detail only counts once the scene as a whole reads dark and
-  // is not also emitting a lot of light: a well-exposed frame legitimately
-  // contains true blacks, and those must stay black instead of engaging the
-  // lift.
+  // still has light budget to spend: a well-exposed frame legitimately contains
+  // true blacks, and those must stay black instead of engaging the lift. The
+  // veto is what keeps this honest on a frame that looks dark but is not — the
+  // lift is the module's only correction that can *add* light, so it is the one
+  // that has to ask permission first.
   const shadowNeed = clamp01((0.14 - shadow) / 0.14);
   const targetLift =
     darkEngage *
@@ -668,6 +763,13 @@ export function updateAdaptState(
   // and stays armed while the scene is dark: bright cuts arrive *from* dark
   // scenes, so the roll-off has to already be in place at the moment of the
   // cut. In between — a normal scene — it disengages entirely.
+  //
+  // `DARK_ROLL_FLOOR` is the older, weaker half of that idea and is kept because
+  // it shapes the approach to the ceiling rather than duplicating it. On its own
+  // it could not bound the transient: it scales `highlightCompression`, which is
+  // a fraction of the range left *after* exposure, and on a dark scene exposure
+  // has taken nothing, so a fully armed shoulder still left white at 0.93 at the
+  // default strength. The ceiling is what actually holds it down.
   const glare = clamp01((highlight - GLARE_START) / (GLARE_FULL - GLARE_START));
   const targetRoll = clamp01(Math.max(darkEngage * DARK_ROLL_FLOOR, glare, brightEngage));
 
@@ -692,6 +794,11 @@ export function updateAdaptState(
         exposure: targetExposure,
         lift: targetLift,
         roll: targetRoll,
+        // Reuses the module's existing definition of "this is a night scene"
+        // rather than introducing a second one. What differs is the timing, not
+        // the test: `targetLift` and `targetRoll` act on this immediately, the
+        // ceiling drags it through DARK_ADAPT_TAU so it survives the cut.
+        darkAdapt: darkEngage,
         histogram: frame,
       },
       prevHistogram: frame,
@@ -737,8 +844,69 @@ export interface ResolvedCurve {
 /** Extra white-point reduction per unit of flash, on top of the exposure dip. */
 const FLASH_WHITE_PULL = 0.45;
 
+/**
+ * The white point a fully bright scene settles on, in closed form.
+ *
+ * This is the ceiling. The argument for choosing *this* number rather than a
+ * tuned constant is that it is the brightest output the extension already
+ * considers acceptable indefinitely: it is what a blazing daylight frame is
+ * given once the exposure servo has finished with it. A cut cannot be allowed
+ * to exceed the level sustained content is held to, so the ceiling is that
+ * level, and there is nothing left to tune.
+ *
+ * Written out rather than obtained from `resolveCurve(params, adaptBounds().
+ * bright)` for two reasons: that call would recurse through the cap, and it
+ * would run `solveKneeScale` — sixty bisection steps — on every frame to
+ * produce a number the caller does not need. The bright bound collapses most of
+ * the general case anyway (no shadow lift, so `lift` is 0, `gamma` is 1 and
+ * `headroom` is just the exposure; no flash; shoulder fully engaged), which is
+ * why this is six lines. `tone-curve.test.ts` pins it against the general path
+ * across the strength range so the two cannot drift apart.
+ */
+export function brightWhitePoint(params: VideoParams): number {
+  const exposure = clamp(params.exposure * clamp(params.adapt.minExposure, 0.2, 2), 0.2, 2);
+  const headroom = clamp01(exposure);
+  const kneeStart = clamp(params.kneeStart, 0.05, 1) * headroom;
+  const shoulder = clamp01(params.highlightCompression);
+  return clamp(headroom * (1 - shoulder), kneeStart + 1e-4, 1);
+}
+
+/**
+ * The highest output level the curve may produce, given how dark-adapted the
+ * viewer is.
+ *
+ * Why a ceiling exists at all. Every other correction in this module is
+ * reactive: it looks at a frame and answers it. That is the right shape for
+ * content that changes continuously and the wrong shape for a cut, because the
+ * offending frame is on screen before anything has measured it. Detection costs
+ * at least a frame, more when `frameStride` has backed off, and a cut that only
+ * partly registers as one gets only partial snap credit — so the reactive path
+ * has no worst-case bound at all. Measured at the default strength, a dark
+ * scene sat at a white point of 0.91 while the bright scene it cut to settled at
+ * 0.67: the gap between those two numbers, for as long as detection took, *was*
+ * the flash.
+ *
+ * The ceiling closes that gap by being armed before the cut instead of after
+ * it. It is not a reaction to the bright frame; it is a standing limit that the
+ * bright frame runs into. That makes the peak output across a cut monotonically
+ * non-increasing regardless of whether the cut was detected, how much snap
+ * credit it earned, or how many frames the engine skipped.
+ *
+ * It stays out of the way of the identity-on-normal-content rule, because it is
+ * gated on `darkAdapt`: a normally exposed scene arms it not at all and gets an
+ * unmodified curve. A dark scene arms it fully, which costs that scene almost
+ * nothing — a night frame has very few pixels above `kneeStart`, and the ones it
+ * does have are lamps and speculars, which is the light worth holding down.
+ */
+export function whitePointCeiling(params: VideoParams, state: AdaptState): number {
+  const armed = clamp01(state.darkAdapt);
+  if (params.bypass || armed <= 0) return 1;
+  return lerp(1, brightWhitePoint(params), armed);
+}
+
 /** Combine static params with the adaptive state into concrete curve numbers. */
 export function resolveCurve(params: VideoParams, state: AdaptState): ResolvedCurve {
+  const ceiling = whitePointCeiling(params, state);
   // A flash does two things: it dips exposure (whole image) and it pulls the
   // white point down (highlights specifically). Exposure alone is not enough,
   // because the shoulder damps most of it right where the glare lives.
@@ -758,11 +926,23 @@ export function resolveCurve(params: VideoParams, state: AdaptState): ResolvedCu
   // had already left, so the top of the range was dimmed twice and flattened
   // twice while the mid-tones got nothing.
   const headroom = clamp01(lift + (1 - lift) * Math.pow(clamp01(exposure), 1 / gamma));
-  const kneeStart = clamp(params.kneeStart, 0.05, 1) * headroom;
+  // The knee is a fraction of the range the curve actually has, which is why it
+  // is scaled rather than fixed: on a bright scene exposure has already lowered
+  // `headroom` and the knee comes down with it. A ceiling shrinks that range the
+  // other way — the input span is untouched but the output may not exceed
+  // `ceiling` — so the knee has to follow the smaller of the two. Leaving it on
+  // `headroom` alone does not merely weaken the ceiling, it *silently* weakens
+  // it: the white point cannot be pulled below the knee, so the clamp below
+  // would quietly hand back a higher number than was asked for, by a margin that
+  // grows with strength. Measured at the default that was 0.75 delivered against
+  // 0.67 requested, and at strength 100, 0.60 against 0.39.
+  const kneeStart = clamp(params.kneeStart, 0.05, 1) * Math.min(headroom, ceiling);
   const shoulder = clamp01(
     params.highlightCompression * clamp01(state.rollScale) + flashAmount * FLASH_WHITE_PULL,
   );
-  const whitePoint = clamp(headroom * (1 - shoulder), kneeStart + 1e-4, 1);
+  // `min` rather than a replacement: a flash guard that has already pulled the
+  // white point below the ceiling keeps its own, lower answer.
+  const whitePoint = clamp(Math.min(headroom * (1 - shoulder), ceiling), kneeStart + 1e-4, 1);
   const kneeScale = solveKneeScale(headroom - kneeStart, whitePoint - kneeStart);
   // The saturation boost pays for the flattening the shadow gamma causes, so
   // it scales with the lift: a fully dark scene gets the whole compensation, a

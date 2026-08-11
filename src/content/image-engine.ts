@@ -98,6 +98,15 @@ export class ImageEngine {
     this.onStatusChange();
   }
 
+  /**
+   * Filter functions to carry after the image curve. The page treatment's root
+   * inversion has to be undone on `<img>`, and since `filter` is one property
+   * this rule is the only one that can do it. See `core/page.ts`.
+   */
+  setPageCompensation(css: string): void {
+    this.filter.setExtraFilters(css);
+  }
+
   getStatus(): ImageEngineStatus {
     return {
       active: this.enabled,

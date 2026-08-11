@@ -53,14 +53,15 @@ function sampleCurve(curve: readonly number[], input: number): number {
  * The video effect, with each half quoted at its own most-engaged state.
  *
  * `adaptBounds()` returns the extreme of each *axis*, not two whole scenes:
- * `dark` is full shadow lift with the *least* highlight roll-off, and `bright` is
- * the reverse. Reading both numbers off one bound therefore pairs the largest
- * shadow lift with the smallest highlight softening and understates the effect.
+ * `dark` is full shadow lift, and `bright` is full exposure dim. The shadow
+ * figure therefore has to be read off `dark`, or it pairs the caption with a
+ * scene the lift never applies to and understates the effect.
  *
- * Since the two caption lines describe two different situations anyway — what
- * happens to a dark scene, and what happens to whites — each is taken from the
- * bound where it actually applies. Together they span the same range as the
- * shaded band on the graph.
+ * The white figure is quoted from `bright` for symmetry rather than necessity:
+ * since the white-point ceiling landed, both bounds resolve to the same white,
+ * so this line describes what happens to highlights anywhere in the adaptive
+ * range instead of at one end of it. `readings.test.ts` holds the two to each
+ * other, so if that ever stops being true this comment fails with it.
  */
 export function videoEffect(strength: number): VideoEffect {
   const params = mapVideoStrength(strength);

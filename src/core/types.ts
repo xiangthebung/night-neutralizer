@@ -3,24 +3,52 @@ import type { SoftClipParams } from './soft-clip';
 
 export type { SoftClipParams };
 
+/**
+ * Everything the user can choose, in four groups: what applies everywhere, the
+ * sound, the picture, and when any of it runs.
+ *
+ * The groups are the popup's panels, in the popup's order, and that is on
+ * purpose — a setting whose neighbours in this file are not its neighbours on
+ * screen is a setting someone will file in the wrong place twice: once here and
+ * once in the UI. Storage is still one flat object under one key, so a group is
+ * a way of reading this list rather than a shape anything has to unpack.
+ */
 export interface Settings {
+  /* ------------------------------ everywhere ------------------------------ */
+
   /** Master switch. When false nothing is processed anywhere. */
   enabled: boolean;
-  /** 0 = bypass, 100 = strongest compression. Drives both halves when linked. */
-  strength: number;
   /**
-   * When true one slider drives audio and video together (the default, and what
-   * most people want). When false each half uses its own value below, because
-   * "compress the audio hard but leave the picture nearly alone" is a perfectly
-   * ordinary preference that a single slider cannot express.
+   * Hostnames to leave completely alone, normalised (lower case, no `www.`, no
+   * port). A listed host also covers its subdomains.
    */
-  linked: boolean;
-  /** Used instead of `strength` for audio when `linked` is false. */
-  audioStrength: number;
-  /** Used instead of `strength` for video when `linked` is false. */
-  videoStrength: number;
-  /** Audio dynamic-range compression on/off. */
+  disabledSites: string[];
+
+  /* -------------------------------- sound --------------------------------- */
+
+  /**
+   * Audio dynamic-range compression on/off. The master switch for this group:
+   * with it off, neither the EQ nor the music exemption below can do anything.
+   */
   audio: boolean;
+  /** 0 = bypass, 100 = strongest compression. */
+  audioStrength: number;
+  /**
+   * Night EQ: shelve the low end down and lift dialogue presence. Compression
+   * makes quiet speech loud enough; this is what lets you turn the *volume*
+   * down, since bass is what carries through walls.
+   */
+  nightEq: boolean;
+  /**
+   * Leave music alone. Dynamic range is the point of a record and a nuisance in
+   * a film, so compressing YouTube Music the way we compress a thriller is the
+   * wrong default. Sound only: tone mapping a music video has nothing to do
+   * with what you are listening to, which is why it lives in this group.
+   */
+  skipMusic: boolean;
+
+  /* ------------------------------- picture -------------------------------- */
+
   /** Video tone mapping on/off. */
   video: boolean;
   /**
@@ -32,17 +60,27 @@ export interface Settings {
    * asking for something reasonable, and one toggle cannot express it.
    */
   images: boolean;
+  /** 0 = bypass, 100 = strongest tone mapping. Drives video and stills alike. */
+  videoStrength: number;
   /**
-   * Night EQ: shelve the low end down and lift dialogue presence. Compression
-   * makes quiet speech loud enough; this is what lets you turn the *volume*
-   * down, since bass is what carries through walls.
+   * Make the page dark.
+   *
+   * Asks the site first (`color-scheme: dark`) and only inverts the ones that
+   * stay light. See `core/page.ts` for why the polite half rarely wins, and
+   * `content/page-engine.ts` for how the answer is measured. Off by default:
+   * inverting a page is the most visible thing this extension can do, and
+   * unlike the tone curve — which is trying to show you the content the way it
+   * was shot — it deliberately changes how a site looks.
+   *
+   * In this group rather than a group of its own because it is the same
+   * complaint as the tone curve, one step further out: the brightest thing on
+   * the screen at 1 a.m. is often not the video but the page behind it. It is
+   * not on the picture slider, though; a page is dark or it is not.
    */
-  nightEq: boolean;
-  /**
-   * Hostnames to leave completely alone, normalised (lower case, no `www.`, no
-   * port). A listed host also covers its subdomains.
-   */
-  disabledSites: string[];
+  darkMode: boolean;
+
+  /* ------------------------------- schedule ------------------------------- */
+
   /**
    * Only process when it is actually night.
    *
@@ -57,13 +95,6 @@ export interface Settings {
   nightStart: number;
   /** End of the night window, minutes since local midnight; may wrap midnight. */
   nightEnd: number;
-  /**
-   * Leave music alone. Dynamic range is the point of a record and a nuisance in
-   * a film, so compressing YouTube Music the way we compress a thriller is the
-   * wrong default. Applies to the audio half only: tone mapping a music video
-   * has nothing to do with what you are listening to.
-   */
-  skipMusic: boolean;
 }
 
 /**
@@ -73,19 +104,18 @@ export interface Settings {
  */
 export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   enabled: true,
-  strength: 45,
-  linked: true,
-  audioStrength: 45,
-  videoStrength: 45,
+  disabledSites: [],
   audio: true,
+  audioStrength: 45,
+  nightEq: false,
+  skipMusic: true,
   video: true,
   images: true,
-  nightEq: false,
-  disabledSites: [],
+  videoStrength: 45,
+  darkMode: false,
   nightOnly: true,
   nightStart: 21 * 60,
   nightEnd: 7 * 60,
-  skipMusic: true,
 });
 
 /** Hard cap on the exclusion list, so storage.sync quota cannot be exhausted. */
@@ -213,6 +243,29 @@ export interface ImageStatus {
   elements: number;
 }
 
+/**
+ * How a request for a dark page was actually answered. The distinction is the
+ * whole point of the setting: `scheme` means the site had a dark presentation
+ * of its own and we asked for it, `invert` means it did not and we took the
+ * picture apart. They do not look alike and they do not fail alike.
+ */
+export type PageDarkMode =
+  /** No dark page was asked for. */
+  | 'off'
+  /** Asked for, and the page was already dark or went dark on request. */
+  | 'scheme'
+  /** Asked for, the page stayed light, so it is being inverted. */
+  | 'invert'
+  /** Asked for, but nothing has been measured yet (the document is empty). */
+  | 'pending';
+
+/** What the dark-page treatment is doing in one frame. */
+export interface PageStatus {
+  /** True when this frame has a page stylesheet installed. */
+  active: boolean;
+  dark: PageDarkMode;
+}
+
 export type AudioState =
   | 'off'
   | 'idle'
@@ -294,6 +347,7 @@ export interface FrameStatus {
     technique: 'svg-tone-curve' | 'css-basic' | 'none';
   };
   images: ImageStatus;
+  page: PageStatus;
   notes: string[];
 }
 
@@ -308,6 +362,7 @@ export interface TabStatus {
   audio: { state: AudioState; processed: number; skipped: number };
   video: { mode: VideoMode; elements: number; technique: FrameStatus['video']['technique'] };
   images: ImageStatus;
+  page: PageStatus;
   notes: string[];
   stale: boolean;
 }

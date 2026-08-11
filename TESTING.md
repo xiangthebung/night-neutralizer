@@ -13,20 +13,22 @@ npm run smoke    # end-to-end in headless Chrome
 
 ## 1. Automated: unit tests
 
-`npm test` — 360 tests, no browser required.
+`npm test` — 438 tests, no browser required.
 
 | file | covers |
 | --- | --- |
 | `tests/strength.test.ts` | strength → processing parameters: true bypass at 0, clamping and non-finite input, monotonicity across all 101 values, release lengthening with strength, **make-up gain that accounts for Chromium's own internal make-up** and keeps the modelled peak below full scale at every strength, **a bounded safety stage always present**, quiet boosted more than loud with the range never inverting, every value inside the Web Audio legal range, no discontinuity next to bypass |
 | `tests/soft-clip.test.ts` | safety clipper: exact identity below the knee, never exceeding the ceiling for input up to 50× full scale, monotonic and symmetric, less than 1 dB cost to a full-scale signal, decreasing slope, curve sampling (odd length, exact zero, identity samples on the identity line), identity params producing a straight line |
-| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **scene gating: a scene inside the light budget converges on the identity, a normally exposed scene over it is dimmed by a clean scale (blacks stay black, saturation untouched, every ratio below the shoulder preserved), ordinary true blacks do not count as crushed shadows, and a bright scene is dimmed without being lifted**, **linear-light measurement reading emitted light rather than how dark a frame looks, and percentiles surviving histogram normalisation**, **a bright scene inside a dark frame: not mistaken for a night scene, and its light output really coming down rather than only its top decile**, **slope allocation: more contrast where the scene lives, endpoints unmoved, monotonic and bounded on every scene and strength, capped so a flat region cannot claim slope for its own noise, disengaged entirely when the curve is giving nothing up, and time-smoothed so the LUT cannot pump**, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, **scene-change snapping: the whole state landing on its target on the frame of the cut in both directions, the response reaching its dimmest at the cut and only recovering from there, no snap on motion within a scene, no snap on a flat-frame fade (where every pixel changes bin), a hard cut snapping at 60/30/8 Hz, the mean-only fallback never over-triggering, and the flash guard left at full strength when the servo is already pinned at minExposure**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers on continuous change, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range and collapsing onto the identity when bypassed**, **the still-image state: never brightening any input level at any strength (the property the whole blind curve rests on), black staying at black while white comes down, a true bypass at strength 0, dimming monotonically with the slider, sitting exactly half way to the exposure floor, no saturation change because it flattens nothing, no history to depend on, and the CSS fallback not brightening either**, CSS fallback shape |
+| `tests/tone-curve.test.ts` | luminance statistics (Rec. 709 weights, percentiles), soft-knee solver, curve monotonicity and bounds for every strength, shadow lift without crushing black, **a visible effect at the default strength**, **the shoulder never being scaled away while a scene is dark**, highlight compression, decreasing slope towards white, mid-tones not washed out, **scene gating: a scene inside the light budget converges on the identity, a normally exposed scene over it is dimmed by a clean scale (blacks stay black, saturation untouched, every ratio below the shoulder preserved), ordinary true blacks do not count as crushed shadows, and a bright scene is dimmed without being lifted**, **linear-light measurement reading emitted light rather than how dark a frame looks, and percentiles surviving histogram normalisation**, **a bright scene inside a dark frame: not mistaken for a night scene, and its light output really coming down rather than only its top decile**, **slope allocation: more contrast where the scene lives, endpoints unmoved, monotonic and bounded on every scene and strength, capped so a flat region cannot claim slope for its own noise, disengaged entirely when the curve is giving nothing up, and time-smoothed so the LUT cannot pump**, **flash detection at 60/30/8 Hz sampling with a fade tripping none of them**, **dim scaling with jump size**, **the white level dropping more than mid-tones when a flash fires**, **scene-change snapping: the whole state landing on its target on the frame of the cut in both directions, the response reaching its dimmest at the cut and only recovering from there, no snap on motion within a scene, no snap on a flat-frame fade (where every pixel changes bin), a hard cut snapping at 60/30/8 Hz, the mean-only fallback never over-triggering, and the flash guard left at full strength when the servo is already pinned at minExposure**, adaptation: bright scenes dim / dark scenes are lifted instead, dims faster than it recovers on continuous change, bounded under NaN/out-of-range input, static state is genuinely fixed and **does not apply strength twice**, **adaptive bounds bracketing the range, meeting at the same white point, and collapsing onto the identity when bypassed**, **the white-point ceiling: peak output never rising across a cut even through eight unmeasured frames, an unmeasured white frame held near the bright-scene white point (43% less emitted light at the default strength, more as the slider rises), the closed-form ceiling not drifting from the general curve path at any strength, the arming level surviving the cut snap that releases everything else, arming slowly and releasing more slowly still, not arming at all on a normally exposed scene, staying out of static and image mode, and yielding to the flash guard rather than overriding it**, **the still-image state: never brightening any input level at any strength (the property the whole blind curve rests on), black staying at black while white comes down, a true bypass at strength 0, dimming monotonically with the slider, sitting exactly half way to the exposure floor, no saturation change because it flattens nothing, no history to depend on, and the CSS fallback not brightening either**, CSS fallback shape |
 | `tests/media-registry.test.ts` | discovery before and after start, dynamic insertion, **duplicate prevention** (re-attach, rescan, DOM move), open shadow roots (and closed ones ignored), removal only after the grace period, re-parented elements surviving, subtree removal, element swap, mutation-storm rescan, throwing handlers, `stop()`/`release()`, idempotent `start()` |
-| `tests/settings.test.ts` | sanitisation of missing/garbage/hostile values, clamping and rounding, unknown keys dropped, save→load round-trip through a fresh store, storage failure falling back to defaults, `ensureDefaults` writing only once, reset, change notifications, ignoring other areas/keys, unsubscribe not leaking listeners, **migration of pre-split settings** (the old single `strength` mirrored into both channels), exclusion-list cleaning, **the default exclusion array never being shared with stored settings**, effective strength with the link on and off |
+| `tests/settings.test.ts` | sanitisation of missing/garbage/hostile values, clamping and rounding, unknown keys dropped, save→load round-trip through a fresh store, storage failure falling back to defaults, `ensureDefaults` writing only once, reset, change notifications, ignoring other areas/keys, unsubscribe not leaking listeners, exclusion-list cleaning, **the default exclusion array never being shared with stored settings**, **migration from the old shape** (the shared `strength` becoming both sliders, per-channel values kept whichever way `linked` was set, `pageDark` arriving as `darkMode`, and `strength`/`linked`/`pageColor` dropped rather than carried along), **dark mode staying off for settings written before it existed** — the opposite migration from `images`, deliberately, because inverting a page must never arrive with an update on someone who did not ask for it |
 | `tests/site.test.ts` | hostname normalisation (case, `www.`, ports, credentials, trailing dots, IPv6 literals, full URLs, opaque origins), **site keys derived from `location.ancestorOrigins`** so an embedded player is governed by the page it is embedded in, subdomain coverage without matching lookalike hosts (`example.com` covers `news.example.com` but not `notexample.com`), a stray empty entry not disabling the whole web, add/remove including collapsing subdomains under a newly added parent and removing a covering parent when a subdomain is re-enabled, list capping |
 | `tests/readings.test.ts` | the popup's plain-language captions: **the figures agree with the very curves and transfer function the engines use**, each is taken from the adaptation bound where it is actually strongest (reading both video numbers off one bound understates the effect), they match the documented figures at the default strength, they grow monotonically with strength, they **never overstate what the chain delivers** (figures are floored), they avoid meaningless output at the bottom of the range ("1.0× brighter", "0% softer"), and they stay under 30 characters so they cannot wrap and push the popup past Chrome's height cap |
 | `tests/video-engine.test.ts` | (jsdom) the frame-skip control law: every frame while the read-back is cheap, **settling on the finest stride that fits the budget instead of ratcheting to the maximum**, **converging to the same stride from any starting point including costs that land exactly on a band edge**, never oscillating once settled, capped at 8, coming back to every frame when sampling gets cheap again, and surviving a nonsense stride or cost |
 | `tests/image-engine.test.ts` | (jsdom) the still-image path: one `img { filter: … }` rule with its own filter id so video and stills can never share a curve, a real 33-entry LUT that ends below full scale, **strength 0 treated as off rather than as an identity curve on every picture on the page**, **self-repair after the page removes the injected nodes**, the timer stopping when switched off, fullscreen re-parenting, a live picture count that needs no per-element bookkeeping, and teardown/`destroy()` leaving no rule behind |
-| `tests/tone-filter.test.ts` | (jsdom) filter and stylesheet installation, idempotency, **self-repair after the page removes the injected nodes**, the CSS-filter fallback, **the `<base href>` workaround writing an absolute URL**, table/saturation writes skipped when unchanged, marking/unmarking, **fullscreen re-parenting of the filter host and back**, teardown leaving no trace but staying rebuildable, `destroy()` refusing to rebuild |
+| `tests/tone-filter.test.ts` | (jsdom) filter and stylesheet installation, idempotency, **self-repair after the page removes the injected nodes**, the CSS-filter fallback, **the `<base href>` workaround writing an absolute URL**, table/saturation writes skipped when unchanged, marking/unmarking, **fullscreen re-parenting of the filter host and back**, teardown leaving no trace but staying rebuildable, `destroy()` refusing to rebuild, **extra filter functions appended after the curve rather than before it**, surviving a curve push, replacing the literal `none` instead of appending to it, and dropped again when dark mode stops needing them |
+| `tests/page.test.ts` | dark mode's maths: CSS colour parsing of what `getComputedStyle` actually serialises (comma and space-slash forms, percentages, `transparent`) and returning null rather than guessing at a wide-gamut colour; luminance measured in **linear light**; canvas luminance from the root then the body then Chrome's own canvas, agreeing with real sites about which are already dark, and **answering differently under the two colour schemes, which is what keeps re-measurement from oscillating**; the plan — nothing installed while the switch is off even once a light page has been measured, `light` rather than `dark` once inverting so UA widgets end up dark, **media given its polarity back by exactly the same filter string, since the pair is an involution rather than an approximation**, and **the squeeze deliberately not compensated on media, because that would need an element filter to emit values outside 0..1 and clamping costs real picture**; the softened inversion — endpoints landing exactly on `#121212` and `#dbdbdb`, the CSS `contrast()`/`brightness()` pair agreeing with the model rather than drifting from it, **black-on-white staying past WCAG AAA at 13.5:1 and mid-contrast text moving from 5.74:1 to only 5.48:1**, and the mapping never reordering two levels so nothing can become invisible; the stylesheet's zero-specificity media rule, `iframe` in it and `canvas`/`svg` deliberately not; **the two `:fullscreen` rules**, since the top layer is not painted through its ancestors' filters but is through its own; the popup caption fitting one line |
+| `tests/page-engine.test.ts` | (jsdom) the dark-mode engine: nothing installed while switched off or gated, **an already-dark page left to its own presentation and a light one inverted**, the body background used when the root paints nothing, an undeclared canvas counting as answered, **the verdict not oscillating across ten upkeep ticks in either direction**, following a page that changes its background later and reporting the change so the media engines can be retold, media handed back its polarity but not the squeeze, the inverted page softened off pure black and pure white, **self-repair after the page removes the stylesheet**, the timer stopping when switched off, and teardown/`destroy()` leaving no root filter behind |
 | `tests/status-reporter.test.ts` | a burst of `schedule()` calls coalescing into one message, unchanged status not resent (ignoring the timestamp), resending once something really changes, ~1 message/second rate limiting, a throwing snapshot builder swallowed, permanent stop once the extension context is gone, `stop()` cancelling a pending report, a rejected `sendMessage` not throwing |
 | `tests/media-origin.test.ts` | Web Audio safety classification: MSE/blob (YouTube, Vimeo), `data:`, `srcObject`, same-origin, `file:`, plain cross-origin flagged risky, CORS-attributed accepted, empty source deferred, unparseable URLs and opaque origins treated conservatively |
 | `tests/status.test.ts` | multi-frame aggregation, state precedence, note deduplication, staleness, pruning, **gate reasons across frames** (one working frame speaks for the tab, a sensor verdict outranks a clock one, the lux value comes from the top frame), music skips summed and a music host noticed in any frame |
@@ -43,7 +45,7 @@ npm run smoke
 
 Installs the built extension into a throwaway Chrome profile over the DevTools
 protocol (`Extensions.loadUnpacked`; Chrome 137+ ignores `--load-extension`),
-serves the test bench, and asserts 78 checks.
+serves the test bench, and asserts 91 checks.
 
 Note that the suite writes `nightOnly: false` and `skipMusic: false` into its
 baseline settings. The shipped defaults only process between 21:00 and 07:00 and
@@ -80,6 +82,28 @@ The checks:
   brightening any level** — black 0.000, white 0.810 at the default strength.
   Turning the toggle off removes the rule live and turning it back on restores
   it, as does strength 0;
+- **dark mode**: the bench page, which is already
+  dark, is left to its own presentation and is *not* inverted; forcing that same
+  page light makes the upkeep loop invert it with no reload, which exercises
+  re-measurement rather than only the first verdict; the image and video rules
+  are read back and must carry the counter-inversion **after** their own tone
+  curve, because `filter` is one property and photographs would otherwise render
+  as negatives; the zero-specificity `:where(…)` rule covers the rest;
+- **a filter on the root element does not break `position: fixed`** — a fixed
+  overlay is measured still pinned at viewport y=0 with the page scrolled
+  1847 px down. This is the documented root-element exception to the
+  containing-block rule, and the one behaviour that would have sunk the whole
+  approach;
+- **both ends of the softened inversion are measured in pixels, with a
+  control**: an inverted white overlay renders at mean luma 0.071 (`#121212`)
+  and an inverted black one at 0.859 (`#dbdbdb`) — not 0.000 and 1.000, which is
+  the whole point — and the white overlay comes back to 1.000 once the switch is
+  off. Without the control those figures would pass on any screenshot that
+  happened to be dark;
+- **the two `:fullscreen` rules are present and correctly shaped**: media in the
+  top layer drops the counter-inversion while keeping its tone curve, and a
+  non-media element in the top layer takes over the root filter. This is the
+  rule set that stops a fullscreen video rendering as a photographic negative;
 - **LUT writes keep pace with presented frames** (30.2 updates/s against
   30.2 fps, median gap 33.4 ms against 33.3 ms per frame), measured with a
   `MutationObserver` on `tableValues` against `requestVideoFrameCallback` on the
@@ -142,18 +166,25 @@ The checks:
 - **leaving music alone**: with the exemption on, the bench's `<audio>` element is
   reported as `music` with `processed = 0` while video still reports `adaptive`,
   so the two halves really are independent; turning it off compresses it again;
-- **separated sliders really separate**: video strength 0 with audio at 70 leaves
-  no marked videos while audio still reports `active`, and the reverse bypasses
-  audio while the tone curve keeps running;
+- **each panel's slider really is its own**: picture strength 0 with sound at 70
+  leaves no marked videos while audio still reports `active`, and the reverse
+  bypasses audio while the tone curve keeps running;
 - **per-site exclusion**: the frame reports a bare hostname (`localhost`), listing
   it stops both halves and sets `siteDisabled`, and listing an unrelated host
   leaves the page alone;
 - a dynamically inserted video is picked up;
 - a nested iframe gets its own content script and filter;
-- the popup renders stored settings, **both** thumbnails draw and track the
-  slider, the link toggle swaps the sliders over and persists the choice, the
-  per-site button names the real host and writes the exclusion, and the status
-  query returns a live aggregate;
+- the popup renders stored settings, **it opens on one switch and one slider per
+  panel with the disclosure closed**, and **each panel holds exactly its own
+  controls in its own order on both tiers** (a switch that drifts into the wrong
+  panel, or up out of More options, is the thing this layout exists to prevent);
+  the strength readout names the level in words; **the picture switch drives both
+  halves of the path and follows them back** when only one is turned off
+  downstairs; both thumbnails draw and track their own slider; each slider
+  persists its own group and leaves the other alone; none of the removed settings
+  comes back into storage; the per-site button names the real host and writes the
+  exclusion; the status query returns a live aggregate; and **the one-line summary
+  agrees with it**, reporting both halves running with an active dot;
 - the popup's night controls: the clock fields stay hidden while the night
   restriction is off, switching it on reveals them and persists the choice, and the
   line under the switch **says which signal is deciding** rather than implying a
@@ -200,9 +231,16 @@ extension only processes `<video>`, so the canvas is your unprocessed reference.
    stepping, and no sudden jump partway through the fade — a snap here would
    mean the cut detector is reading a gradual change as a scene change.
 4. Watch the single-frame **FLASH**. It should be clearly softer in the video
-   than in the canvas. The guard is reactive, so a one-frame flash is shortened
-   rather than removed; the cut into the snow scene at t=3 s shows the effect
-   much more clearly because it lasts longer than one frame.
+   than in the canvas. Two mechanisms are working here and they are worth telling
+   apart. The guard is reactive, so the part of the flash it answers is shortened
+   rather than removed — the cut into the snow scene at t=3 s shows that much
+   more clearly, because it lasts longer than one frame. The white-point ceiling
+   is not reactive, and it is what bounds the very first frame: because it was
+   already armed by the dark scene before it, even a flash frame the sampler
+   never measured cannot exceed the white point a sustained bright scene gets.
+   To see it on its own, set the stride high enough that the flash is certainly
+   missed (a 4K source, or `frameStride` forced in the debugger) — the flash
+   should still be capped, just no longer shortened.
 5. Move the slider from 0 to 100 while playing. At 0 the video must be pixel
    identical to the canvas. There should be no jump at the bottom of the range.
 6. Click **Request fullscreen** and confirm the effect still applies, then exit.
@@ -363,8 +401,8 @@ Use Netflix, Prime Video, Disney+, or Spotify's web player.
 
 ## 10. Per-site exclusions
 
-1. On a page with a video, open the popup. The status card's title row should
-   offer **Skip *hostname***, naming the site you are on.
+1. On a page with a video, open the popup and expand **More options**. Under
+   *This tab* it should offer **Skip *hostname***, naming the site you are on.
 2. Click it. Processing stops for that tab immediately — the popup says
    `turned off on <host>` for both halves, and that tab's badge reads `site`
    while the master switch stays on.
@@ -441,12 +479,69 @@ Use Netflix, Prime Video, Disney+, or Spotify's web player.
 6. On a page with both a film and a music player going at once, the status line
    should read `compressing 1 player, 1 left as music`.
 
+## 13a. Dark mode
+
+The switch is off by default, so start by turning it on — it is the last row of
+the **Picture** panel. Everything here is also gated by night, so either be
+inside the window or switch **Only at night** off first.
+
+1. **A site that already has a dark theme.** Open one in it (GitHub with dark
+   selected, or any site while your OS is in dark mode). The line under the
+   switch must read *Using this site's own dark theme*, and the page must
+   **not** change appearance. If it inverts a page that was already dark, the
+   luminance threshold is wrong.
+2. **A site that has none.** Find a stubbornly light page. The line must read
+   *No dark theme here, so inverting*, and the page should go dark with its hues
+   preserved — a blue header stays blue rather than turning orange.
+3. **Photographs must not be negatives.** On that inverted page, check every
+   `<img>` and any video: they must look normal (or tone-mapped), never
+   inverted. This is the failure that the counter-inversion exists to prevent,
+   and it is the first thing to check after any change to the image or video
+   engine's CSS rule. Check it with **Images** both on and off — the two take
+   different code paths to the same result.
+4. **Fullscreen, which is the same failure one layer down.** Play a video and go
+   fullscreen with dark mode on. It must *not* be a negative. A fullscreen
+   element is in the top layer, which is not painted through its ancestors'
+   filters but is painted through its own, so the counter-inversion has to come
+   off it — and the tone curve has to stay. Then fullscreen a non-video element
+   (an image gallery, a slideshow, a `<dialog>`-based lightbox): it must stay
+   dark rather than flashing back to white.
+5. **Neither end is absolute.** Sample the background of an inverted page with a
+   colour picker: it should read about `#121212`, not `#000000`, and body text
+   about `#dbdbdb`, not `#ffffff`. If either is pure, the squeeze is not being
+   applied.
+6. **The picture slider does not touch it.** Drag **Picture** strength to 0 with
+   dark mode on: the tone curve must bypass while the page stays dark. A page is
+   dark or it is not, and the slider has no say in it.
+7. **Form controls.** Inputs, selects and buttons on the inverted page must be
+   dark, not glowing white. If they glow, the applied `color-scheme` is `dark`
+   where it should be `light`.
+8. **`position: fixed` survives.** Scroll a page with a sticky header a long way
+   down. The header must stay pinned. A filter on the root element is
+   specifically exempt from creating a containing block, and this is the check
+   that catches a regression if that ever changes.
+9. **Nested frames.** Open a page with an embedded player or comment widget. The
+   iframe should be treated by its own copy of the engine — dark if its content
+   is light — rather than left bright or double-inverted back to white.
+10. **It follows a page that changes.** On a site with its own light/dark
+   switcher, flip the site's theme while the extension's dark mode is on. Within
+   about two seconds the readout should change between *inverting* and *using
+   this site's own dark theme*, with no reload.
+11. **Nothing is left behind.** Switch it off and confirm the page returns
+   exactly to normal, with no `#nn-page-style` in the DOM and no `filter` on the
+   root element.
+12. **Cost.** On a heavy page, watch for stutter with the switch on: a root
+    filter puts the whole document on a composited layer. If a page is
+    noticeably worse, that is a real limitation rather than a bug.
+
 ## 14. Accessibility pass
 
 1. Open the popup and drive it with the keyboard only: `Tab` through master
-   toggle → strength slider → link toggle → only-at-night → the two clock fields
-   → audio → video → night EQ → leave-music-alone → skip-site button → reset.
-   Every control must show a visible focus ring.
+   toggle → sound switch → sound strength → night EQ → leave-music-alone →
+   picture strength → video → images → dark mode → only-at-night → the two clock
+   fields → skip-site button → reset. That order is the panels' order, so a
+   control reached out of turn means the markup and the layout have drifted
+   apart. Every control must show a visible focus ring.
 2. Toggle with `Space`, move the slider with arrows and `Home`/`End`, and type or
    arrow through the clock fields. Clearing a clock field and tabbing away must
    restore the stored time rather than writing a broken window.
@@ -481,10 +576,40 @@ height budget. To check it without clicking through a browser:
 
 ```bash
 npm run build
-node scripts/popup-shot.mjs 45 ./popup.png          # linked sliders
-SPLIT=1 NIGHT_EQ=1 node scripts/popup-shot.mjs 45   # the taller state
+node scripts/popup-shot.mjs 45 ./popup.png                        # the worst case
+MORE=1 node scripts/popup-shot.mjs 45 ./popup-open.png            # with the disclosure open
+DARK_MODE=0 NIGHT_ONLY=0 node scripts/popup-shot.mjs 45           # the shortest state
+AUDIO_STRENGTH=85 VIDEO_STRENGTH=0 node scripts/popup-shot.mjs    # the two panels disagreeing
 ```
 
-It prints the measured height, the height with the per-site button showing (the
-worst case), and whether that fits the cap. Current: 547 px linked, 553 px with
-the per-site button, 594 px with the sliders separated.
+It prints the measured height with **More options** closed, that height with the
+per-site button showing, the height with the disclosure open, and whether the
+closed state fits the cap. Dark mode and the night window both default to **on**
+in this script, because their extra rows are part of the worst case and measuring
+them hidden would flatter the layout.
+
+The budget applies to the state the popup *opens* at. Everything behind the
+disclosure is reported for information: it runs past 600 px and scrolls, which is
+the consequence of a deliberate click rather than the state you are handed.
+
+Current measurements:
+
+| state | height | with the per-site button | with More options open |
+| --- | --- | --- | --- |
+| night window hidden, dark mode off | 430 | 430 | 905 |
+| night window hidden, dark mode on | 430 | 430 | 925 |
+| night window shown | 472 | 472 | 946 |
+| both on (the worst case) | **472** | 472 | 966 |
+
+**Every state the popup opens at fits, with 128 px to spare in the worst case.**
+The per-site button and dark mode's readout no longer change that number at all —
+both live behind the disclosure now — so the only rows that come and go up front
+are the night window's clock fields.
+
+Two layouts ago a shared strength card sat above one long list of switches, and
+its split-slider state came to 634/639 — 39 px over, scrolling quietly. Giving
+each panel its own slider and putting the graph beside its caption bought that
+back at 585/591, 9 px inside the cap. Moving the graphs, the per-path switches
+and the per-tab detail behind **More options** is what turned a 9 px margin into
+a 128 px one; nothing enforces it either way, since `popup-shot.mjs` reports an
+overflow but exits 0 and is not run in CI.

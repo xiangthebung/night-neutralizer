@@ -50,6 +50,7 @@ export class ToneFilter {
   private saturateNode: Element | null = null;
   private styleNode: HTMLStyleElement | null = null;
   private technique: ToneTechnique = 'none';
+  private extraFilters = '';
   private lastTable = '';
   private lastSaturation = -1;
   private lastRule = '';
@@ -174,12 +175,46 @@ export class ToneFilter {
 
   private writeRule(): void {
     if (!this.styleNode) return;
-    const value =
+    const base =
       this.technique === 'svg-tone-curve' ? this.filterReference() : this.fallbackCss;
-    const rule = `${this.selector}{filter:${value} !important;}`;
+    // `filter` is one property, so a rule elsewhere cannot add to this one — it
+    // can only replace it. Anything the page treatment needs applied to the same
+    // elements therefore has to be appended here. See `PAGE_MEDIA_SELECTOR`.
+    const value = this.extraFilters
+      ? base === 'none'
+        ? this.extraFilters
+        : `${base} ${this.extraFilters}`
+      : base;
+    let rule = `${this.selector}{filter:${value} !important;}`;
+
+    /*
+     * A fullscreen element is in the top layer, which is *not* painted through
+     * its ancestors' filters but is painted through its own. So while this
+     * element is fullscreen there is no root inversion left for the page
+     * treatment's counter-inversion to cancel, and carrying it would render the
+     * video as a photographic negative. The tone curve stays — that is this
+     * engine's own correction and it is wanted in fullscreen more than
+     * anywhere. Only the borrowed half is dropped.
+     */
+    if (this.extraFilters) {
+      rule += `${this.selector}:fullscreen{filter:${base === 'none' ? 'none' : base} !important;}`;
+    }
+
     if (rule === this.lastRule) return;
     this.lastRule = rule;
     this.styleNode.textContent = rule;
+  }
+
+  /**
+   * Filter functions to append after the tone curve, for effects this instance
+   * does not own. Used by the page treatment to undo its own root inversion on
+   * the elements this filter has claimed.
+   */
+  setExtraFilters(css: string): void {
+    const next = css.trim();
+    if (this.extraFilters === next) return;
+    this.extraFilters = next;
+    this.writeRule();
   }
 
   /** Push a new lookup table (values in 0..1, monotonic). */

@@ -43,17 +43,21 @@ describe('videoEffect', () => {
     }
   });
 
-  it('takes each figure from the bound where it is strongest', () => {
-    // `adaptBounds()` gives the extreme of each axis, not two whole scenes:
-    // `dark` is full lift with the least roll-off. Reading both numbers off one
-    // bound understates the effect, which is what this guards against.
+  it('quotes a white drop both bounds agree on', () => {
+    // `adaptBounds()` gives the extreme of each axis rather than two whole
+    // scenes, so the shadow figure still has to come off `dark`. The white
+    // figure used to as well — `dark` had the least roll-off, and quoting it
+    // would have understated the effect. The white-point ceiling has since
+    // closed that gap: both bounds now land on the same white, so the caption
+    // is quoting a number that holds across the whole adaptive range rather
+    // than one end of it.
     const strength = 45;
     const params = mapVideoStrength(strength);
     const bounds = adaptBounds(params);
     const liftedWhite = 1 - (buildToneCurve(params, bounds.dark, 65).at(-1) as number);
     const rolledWhite = 1 - (buildToneCurve(params, bounds.bright, 65).at(-1) as number);
 
-    expect(rolledWhite).toBeGreaterThan(liftedWhite);
+    expect(rolledWhite).toBeCloseTo(liftedWhite, 10);
     expect(videoEffect(strength).whiteDrop).toBeCloseTo(rolledWhite, 10);
   });
 

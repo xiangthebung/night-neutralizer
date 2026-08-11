@@ -13,14 +13,19 @@ ambushed by a bright cut or an explosion.
   that can only ever darken — a picture's pixels are usually cross-origin and
   cannot be measured, so it is never guessed at in the direction that would make
   the screen brighter.
+- **The page around it, optionally.** A dark mode switch, off by default
+  because it changes how a site *looks* rather than how its content is exposed:
+  it asks the site for its own dark presentation first and inverts only the
+  pages that stay light.
 - **Only when it is actually night.** If the browser exposes an ambient light
   sensor, the room decides; otherwise a configurable window on the clock does.
   Default 21:00–07:00.
 - **Music is left alone.** Dynamic range is the point of a record and a nuisance
   in a film, so YouTube Music, Spotify and anything else playing audio-only keep
   their dynamics.
-- **Per-site and per-channel:** one slider by default, two when you want the
-  audio squashed and the picture left alone, and a one-click "skip this site".
+- **Grouped and per-site:** sound and picture are separate panels with separate
+  strength sliders, so "squash the soundtrack, leave the picture alone" is one
+  drag; plus a one-click "skip this site".
 - **Local only:** one permission (`storage`), no network access, no accounts,
   no telemetry, no remote code.
 
@@ -38,6 +43,8 @@ ambushed by a bright cut or an explosion.
   - [Why not canvas or WebGL?](#why-not-canvas-or-webgl)
   - [What "adaptive" means here](#what-adaptive-means-here)
   - [Still images](#still-images)
+- [The page itself](#the-page-itself)
+  - [Dark mode](#dark-mode)
 - [Performance](#performance)
 - [Limitations (read this)](#limitations-read-this)
 - [Privacy](#privacy)
@@ -102,66 +109,105 @@ a specific build.
 
 ## Using it
 
-Click the toolbar icon:
+Click the toolbar icon. The popup opens on the three things you would reach for
+while watching something — is it on, how much sound, how much picture — and
+keeps everything that is set once and then left alone behind **More options**.
+Nothing is hidden from you; it is one click deeper because a control you touch
+twice a year should not be competing with the slider you came in for.
 
-- **On/off** — master switch. Off means nothing is processed anywhere.
-- **Neutralization strength (0–100)** — higher strength means stronger
-  correction *where a scene needs it*: quiet gets louder, loud gets quieter,
-  dark scenes get opened up further and bright scenes get pulled down harder. A
-  scene already inside the light budget passes through untouched at any
-  strength; one over it is dimmed, but by a clean scale rather than by having
-  its blacks greyed and its highlights flattened. Lower strength keeps more of
-  the original contrast and punch. **0 is a complete bypass.** Default is 45.
-- **Set audio and video separately** — splits the slider in two. One number
-  cannot express "compress the soundtrack hard but barely touch the picture",
-  which is an ordinary thing to want. Re-linking takes the midpoint of the two.
-- **The caption under each graph says what the setting does**, in numbers: at the
-  default, "dark scenes 2.9× brighter / whites 28% softer" and "quiet parts
-  +9 dB / loud-to-quiet gap −9 dB". Those come from `core/readings.ts`, which
-  derives them from the same curve and transfer functions the engines use, so a
-  caption cannot describe an effect the extension is not applying. Figures are
-  rounded *down*, because the transfer model reads slightly optimistic against a
-  rendered measurement.
-- **The two graphs** are the actual effect at the chosen setting, not decoration,
-  and they are the detail behind those captions rather than the only explanation
-  of them. The left one is the video tone curve, drawn with the same
-  `buildToneCurve()` the content script uses; its shaded band is the range the
-  curve moves within as scenes get darker or brighter, so the band's width shows
-  how much adaptation headroom the setting has. The right one is the audio
-  transfer curve: settled input level against output level in dB, from the same
-  `mapAudioStrength()` the engine uses. In both, the dotted diagonal is
-  "unchanged", so the shaded area is exactly how much is being done to the signal.
-  Hovering either one describes its axes.
+**What it opens on**
+
+- **On/off** — master switch, top right. Off means nothing is processed anywhere.
+- **The line under it** says what is happening on this tab in one sentence:
+  *Softening the sound and picture*, *Waiting for 09:00 PM*, *Left alone on
+  youtube.com*, *Paused*. The per-path detail behind it is in More options,
+  because it only earns its space when the answer is surprising.
+- **Sound** — its own switch, and a strength slider from 0 to 100. Higher
+  strength means stronger correction *where the material needs it*: quiet gets
+  louder and loud gets quieter. Lower strength keeps more of the original punch.
+  **0 is a complete bypass.** Default is 45.
+- **Picture** — its own switch, and its own slider. Dark scenes get opened up
+  further and bright scenes get pulled down harder as it rises. A scene already
+  inside the light budget passes through untouched at any strength; one over it
+  is dimmed, but by a clean scale rather than by having its blacks greyed and its
+  highlights flattened. **0 is a complete bypass.** Default is 45. It is a
+  separate number from the sound panel's, because "compress the soundtrack hard
+  but barely touch the picture" is an ordinary thing to want. The switch here
+  stands for both halves of the picture path; the two halves are separable in
+  More options.
+- **The strength readout is a word** — *Gentle*, *Balanced*, *Strong* — because
+  the word is the part anyone acts on. The number is still on the slider itself,
+  and it is what a screen reader announces.
 - **Only at night** — on by default, and the reason the extension can be left
   installed and forgotten. See [When it runs](#when-it-runs). The line under the
   switch says which signal is in charge: a light-sensor reading in lux if the
   browser gives one, otherwise "no light sensor here, so the clock decides". The
   two clock fields below it set the window and only appear while the switch is on.
-- **Audio** / **Video** / **Images** — process each independently. Video and
-  Images share a row because they are the two halves of the picture path, and
-  because the popup has a height budget. They are a different bargain from each
-  other: a video is measured frame by frame and corrected for what it contains,
-  while a still cannot be measured at all and gets one fixed curve that only
-  ever darkens — see [Still images](#still-images). Both on by default, both
-  driven by the picture slider, and 0 is a bypass for both.
-- **Leave music alone** — on by default. See
-  [Leaving music alone](#leaving-music-alone).
+
+**More options**
+
+Grouped by the panel each control belongs to, so a switch has one obvious home.
+The disclosure remembers whether you left it open.
+
+*Sound*
+
+- **The graph and its caption** say what the slider is doing, in numbers: at the
+  default, "quiet parts +9 dB / loud-to-quiet gap −9 dB". Those come from
+  `core/readings.ts`, which derives them from the same transfer function the
+  engine uses, so a caption cannot describe an effect the extension is not
+  applying. Figures are rounded *down*, because the transfer model reads slightly
+  optimistic against a rendered measurement.
 - **Night EQ** — off by default. Compression fixes "I can't hear the dialogue",
   but the reason you reach for the volume knob at night is low frequency: bass
   travels through walls and floors where midrange does not. This shelves the low
   end down (up to −7 dB below 120 Hz) and lifts a wide bell at 2.6 kHz (up to
   +3.5 dB) to buy back the consonants that go down with it.
-- **Skip *hostname*** — in the status card, leaves that site completely alone,
-  audio and video. Useful for a site that already tone-maps its own video, a work
-  tool you never watch at night, or anything that misbehaves. Listing a domain
-  also covers its subdomains, and it matches both the page you are on and the
-  origin of an embedded player, so skipping `youtube.com` also silences YouTube
-  embeds elsewhere.
-- **Right now on this tab** — shows what is actually happening: one line for
-  sound (how many players are being compressed) and one for the picture, which
-  reports both halves at once — whether video is running *adaptive tone mapping*
-  (frames are being measured) or a *fixed night curve* (frames cannot be read,
-  e.g. DRM), and how many stills the image curve is on.
+- **Leave music alone** — on by default. Sound only, which is why it is here and
+  not in the picture group: tone mapping a music video has nothing to do with
+  what you are listening to. See [Leaving music alone](#leaving-music-alone).
+
+*Picture*
+
+- **The graph and its caption**, the same way: "dark scenes 2.9× brighter /
+  whites 28% softer" at the default. The curve is the actual effect at the chosen
+  setting, not decoration — it is drawn with the same `buildToneCurve()` the
+  content script uses, and its shaded band is the range the curve moves within as
+  scenes get darker or brighter, so the band's width shows how much adaptation
+  headroom the setting has. The sound one is the audio transfer curve: settled
+  input level against output level in dB, from the same `mapAudioStrength()` the
+  engine uses. In both, the dotted diagonal is "unchanged", so the shaded area is
+  exactly how much is being done to the signal. Hovering either one describes its
+  axes.
+- **Video** / **Images** — the two halves the front switch stands for, separable
+  here; both on by default, both driven by the picture slider. They are a
+  different bargain from each other: a video is measured frame by frame and
+  corrected for what it contains, while a still cannot be measured at all and
+  gets one fixed curve that only ever darkens — see
+  [Still images](#still-images).
+- **Dark mode** — the page *around* the media, and **off by default**.
+  Everything else here treats content and tries not to change what the author
+  intended; this changes how a site looks on purpose, so it has to be asked for.
+  It asks the site for its own dark presentation and inverts only the pages that
+  stay light — the line under the switch says which of the two happened on the
+  current tab, because they do not look alike and they do not fail alike. It is
+  the one picture control the slider does not touch: a page is dark or it is not.
+  See [The page itself](#the-page-itself).
+
+*This tab*
+
+- **The two status lines** behind the one-sentence summary: one for sound (how
+  many players are being compressed) and one for the picture, which reports both
+  halves at once — whether video is running *adaptive tone mapping* (frames are
+  being measured) or a *fixed night curve* (frames cannot be read, e.g. DRM), and
+  how many stills the image curve is on.
+- **Skip *hostname*** — leaves that site completely alone, audio and video.
+  Useful for a site that already tone-maps its own video, a work tool you never
+  watch at night, or anything that misbehaves. Listing a domain also covers its
+  subdomains, and it matches both the page you are on and the origin of an
+  embedded player, so skipping `youtube.com` also silences YouTube embeds
+  elsewhere.
+- **Reset to defaults**, and the keyboard shortcut the extension is currently
+  bound to, are at the bottom of the same panel.
 
 Changes apply immediately to open tabs; no reload. Settings live in
 `chrome.storage.sync`, so they follow your Chrome profile.
@@ -201,16 +247,21 @@ the local clock ───────────────────►   �
                                   core/gate.ts
                         "should this frame do anything, and why not"
                                        │
-                        ┌──────────┬────┴─────┬───────────────┐
-                        ▼          ▼          ▼               ▼
-                 MediaRegistry AudioEngine VideoEngine    ImageEngine
-                 (discovery,   (Web Audio  (measure       (one fixed
-                  dedupe,       DRC chain)  frames, push    curve for
-                  lifecycle)                tone curve)     every <img>)
-                                                 │               │
-                                                 ▼               ▼
-                                            ToneFilter      ToneFilter
-                                         (SVG LUT + CSS rule, one each)
+                        ┌──────────┬────┴─────┬───────────────┬──────────────┐
+                        ▼          ▼          ▼               ▼              ▼
+                 MediaRegistry AudioEngine VideoEngine    ImageEngine    PageEngine
+                 (discovery,   (Web Audio  (measure       (one fixed     (root filter,
+                  dedupe,       DRC chain)  frames, push    curve for     measures the
+                  lifecycle)                tone curve)     every <img>)  page's own
+                                                 │               │        background)
+                                                 ▼               ▼              │
+                                            ToneFilter      ToneFilter          │
+                                         (SVG LUT + CSS rule, one each)         │
+                                                 ▲               ▲              │
+                                                 └───────────────┴──────────────┘
+                                              counter-inversion, because `filter`
+                                              is one property and only one rule
+                                              per element can win
 ```
 
 Design notes:
@@ -465,10 +516,13 @@ black point, a gamma-brightened mid-tone or a flattened top.
    allows. Below the budget nothing happens, so there is a genuine dead band;
    above it the dim is proportional to how far over the frame is.
 2. **shadow opening** — `v = v^(1/γ)` plus a small absolute black lift, so
-   near-black detail separates instead of staying crushed. Engages only as the
-   scene as a whole reads dark, and is vetoed outright once the frame is
-   emitting real light: a well-exposed frame legitimately contains true blacks,
-   and those stay black.
+   near-black detail separates instead of staying crushed. This is the only
+   stage that can *add* light, so it is the one that has to ask permission
+   first: it engages as the scene reads dark, and in proportion to the room the
+   frame has left under the same comfort budget the exposure servo steers to.
+   A frame already delivering that budget gets none of it, whatever its mean
+   says — a well-exposed frame legitimately contains true blacks, and those stay
+   black.
 3. **highlight shoulder** — above a knee `k`, `v = k + a·(1 − e^−((v−k)/a))`.
    Slope is exactly 1 at the knee and decreases from there, so mid-tone contrast
    survives while highlights compress instead of clipping. `a` is solved by
@@ -541,6 +595,19 @@ classifier it got no exposure dim at all, only a shoulder that shaved ~10% off
 the top decile while leaving the frame's total light output unchanged. Measured
 in linear light it is a 0.46, well over budget, and it now comes down as a
 bright scene should.
+
+Dark-mode content is the same failure one notch further down, and it is what
+placed the veto band where it now sits. A screencast of a dark-mode editor is
+half flat dark background, so its encoded mean is 0.25 and it reads as a night
+scene; but the light arrives through the text, and it is already emitting 0.33
+against a budget of 0.36. There is no shadow detail in a flat fill to recover,
+so the lift bought nothing and cost light: its background went from 30/255 to
+46/255 at the default strength and 75/255 at the top of the slider, and the
+frame left 19% brighter than it arrived. The veto band used to *start* at the
+budget and not release until a quarter over it; it now ends there, which is the
+only place a gate on emitted light can honestly sit. That background now moves
+by at most 7 codes across the whole slider, and genuine night scenes — which
+have the headroom to spend — are unaffected to the bit.
 
 Verified against *rendered pixels*, not just the maths: the smoke test
 screenshots two static grey-ramp videos — one full-range (a normal scene) and
@@ -691,7 +758,60 @@ the old curve. There is no frame lookahead available to an extension, so
 pre-emption is not possible, and where the engine has backed off to every 4th or
 8th frame to stay inside its CPU budget the detection latency scales with it.
 What it can do — and does — is stop a bright cut or a multi-frame strobe from
-staying painful.
+staying painful. What bounds the frames it cannot reach is the ceiling below.
+
+**The white-point ceiling** is the one part of the curve that does not react to
+anything, and that is its entire job. Reaction is the wrong shape for a cut: the
+bright frame reaches the screen before the read-back that would have answered it.
+Detection costs a frame at best, `stride` frames when the sampler has backed off,
+and a partial cut earns only partial snap credit — so the reactive path has no
+worst case to quote. Measured at the default strength, a settled night scene sat
+at a white point of 0.93 while the daylight scene it cut to settled at 0.71. For
+however long detection took, that gap was the flash.
+
+So the curve carries a standing cap on its output, armed *before* the cut rather
+than in response to it. Peak output across a cut is now monotonically
+non-increasing, whatever the sampler did or did not notice.
+
+The cap is **the bright-scene white point** — not a tuned constant. That is the
+brightest output the extension already holds sustained content to, so a cut is
+simply not permitted to exceed what a blazing daylight frame is given once the
+servo has finished with it. Nothing to tune, and it inherits the slider: on an
+unmeasured white frame, emitted light drops 18% at strength 25, 43% at 45, 60%
+at 60 and 79% at 100.
+
+It does not wash out normal content, because it is gated on **how dark-adapted
+the viewer is** rather than on the current frame. A normally exposed scene arms
+it not at all and gets a bit-for-bit unchanged curve; only a scene the module
+already calls dark arms it, and that costs the dark scene almost nothing, since
+a night frame has very few pixels above the knee and the ones it has are lamps
+and speculars — the light actually worth holding down. The whole correction is
+spent above the knee: the knee is re-solved against the lower white point, so
+everything below it is untouched and the shoulder stays C1-continuous. Lowering
+exposure or raising the shoulder to the same effect would have reached into the
+mid-tones, which is the washed-out failure this project already fixed once.
+
+The arming level is deliberately the one piece of state **exempt from the cut
+snap**. A cut out of a night scene is precisely the moment the incoming frame
+stops reading as dark, so snapping it would release the ceiling on the very frame
+it was holding. It eases in over 2.5 s and out over 5 s instead, which makes the
+protection a property of where the viewer has *been* rather than of what just
+arrived. The slow release is free on genuinely bright content — the exposure
+servo puts the white point below the ceiling within about a second, so the cap
+stops binding long before it lifts — and it was measured not to pump on the case
+that could have: leaving a dark scene for a normal one moves the curve by at most
+9.5 8-bit levels per frame, against 9.4 with the ceiling pinned off, and that
+0.1-level difference sits inside the first half second where the exposure and
+lift easing already dominates.
+
+Two visible consequences. `adaptBounds()`' two ends now meet at the top, since
+the dark bound carries the ceiling armed and the ceiling *is* the bright bound's
+white — so the popup's shaded band is a band in the shadows and a single point at
+the white end, which is the guarantee drawn rather than described. And the
+ceiling stays out of **static and image mode** entirely: neither can measure a
+scene, so neither can know whether the viewer is dark-adapted, and arming it
+blind would dim protected video below everything else at the same slider
+position.
 
 The popup reports `adaptive` only when frames are really being measured. If they
 cannot be read, it says **fixed night curve** and the applied curve is a static,
@@ -763,6 +883,159 @@ element to measure; here there is nothing to measure. A 2 s timer handles the
 same upkeep the video engine does (repair our nodes if the page removes them,
 follow the fullscreen subtree), and switching the toggle off removes the
 stylesheet and the filter definition entirely.
+
+---
+
+## The page itself
+
+Everything above treats *content* — a film, a photograph — and takes some care
+not to change what the author intended. At one in the morning, though, the
+brightest thing on the screen is usually not the video: it is the white article
+body behind it. Dark mode treats that, and because it changes how a site *looks*
+rather than how its content is exposed, it is **off by default** and is not
+implied by the master switch. It is gated by night like everything else.
+
+> There used to be a second switch here, **Page colour**, which pulled the whole
+> document towards grey on a `saturate()` riding the picture slider. It was
+> removed: dark mode already does the thing it was for, more thoroughly, and a
+> desaturated-but-still-white page is neither the site's design nor a comfort
+> win worth a permanent switch in a popup with a 600 px height budget.
+
+### Dark mode
+
+**Ask the site first, and measure whether it answered.**
+
+The polite request is `color-scheme: dark` on the root. It is worth making
+because it is free and it fixes exactly the parts inversion handles worst: form
+controls, scrollbars, and the canvas behind a page that paints no background of
+its own.
+
+**What it does not do is flip `prefers-color-scheme`.** That media query reports
+the *user's* preference, not this property, and an extension holding no
+`debugger` permission cannot change it. So the large majority of sites — the
+ones that put their dark theme behind `@media (prefers-color-scheme: dark)` —
+will not respond to it at all. This was measured in Chrome rather than assumed,
+and it is the reason the fallback exists and the reason the fallback is the path
+most pages will actually take.
+
+**The measurement** is the colour of the page canvas, read through
+`getComputedStyle`. The root element's background paints the canvas; when it has
+none, the body's is propagated there instead, so those two are checked in that
+order and the first that paints anything wins. When neither paints, the canvas
+is Chrome's own — and that is where the polite request pays off, because under
+`color-scheme: dark` it is already near black. Luminance is computed in linear
+light, for the same reason scenes are: a page at or below 0.18 counts as already
+dark and is left alone. GitHub's dark background measures 0.007 and its light
+one 0.90.
+
+`getComputedStyle` reads *computed* values, which a `filter` does not affect —
+filters are a paint-time operation — so measuring a page while our own inversion
+is applied does not feed back on itself. Re-measurement runs on a 2 s upkeep
+timer, which is what catches an SPA route change or a theme switcher.
+
+**The fallback** is `invert(1) hue-rotate(180deg)` on the root, undone on media.
+That pair is an involution rather than an approximation: writing `I(x) = 1 − x`
+and `M` for the hue-rotation matrix, `f(x) = M(1 − x) = 1 − Mx` because `M`
+fixes white, so `f(f(x)) = x` exactly. A photograph inside an inverted page
+comes back out exactly as it went in.
+
+**Neither end goes all the way.** A straight inversion sends a white page to
+`#000000` and its black text to `#ffffff`, which is the maximum contrast
+available and more than anyone wants at 1 a.m. — a pure white glyph on pure
+black glares and smears. So the inverted output is squeezed into
+`#121212 … #dbdbdb`, by a `contrast()`/`brightness()` pair that composes to the
+affine map `out = in·(ceiling − floor) + floor`.
+
+That costs far less legibility than it sounds like it should, because the
+squeeze is **relational**: text and background move together, so contrast ratios
+are very nearly preserved rather than traded away.
+
+| | before | after |
+| --- | --- | --- |
+| black on white | 21.0:1 | 13.5:1 |
+| `#666` on white | 5.74:1 | 5.48:1 |
+
+WCAG AAA asks 7:1 for body text, so the headline case clears it with room, and
+mid-contrast text barely moves at all. Both figures are pinned by unit tests,
+and the two endpoints are measured off real screenshots in `npm run smoke`
+(0.071 and 0.859, against `#121212` = 0.071 and `#dbdbdb` = 0.859).
+
+**Media rides the same squeeze, and is not compensated for it.** That is a
+property of filters rather than a decision: an element filter would have to emit
+values outside 0..1 to land outside `[floor, ceiling]` after the root has run,
+and those are clamped. Compensating would mean asking for that impossible
+expansion — everything above 85% of a photograph's range would flatten into one
+value. Riding the squeeze instead is a linear scale that loses no detail at all.
+The cost is a black point lifted to `#121212`, which is the same colour as the
+page behind it, so a letterboxed video's bars match the page rather than sitting
+in a darker rectangle.
+
+```css
+:root { color-scheme: light !important;
+        filter: invert(1) hue-rotate(180deg)
+                contrast(0.849) brightness(0.93) !important; }
+:where(img,video,iframe,embed,object) {
+        filter: invert(1) hue-rotate(180deg) !important; }
+:where(img,video,iframe,embed,object):fullscreen { filter: none !important; }
+:fullscreen:not(:where(html,body,img,video,iframe,embed,object)) {
+        filter: invert(1) hue-rotate(180deg)
+                contrast(0.849) brightness(0.93) !important; }
+```
+
+**The two `:fullscreen` rules are not an edge case.** A fullscreen element is in
+the *top layer*, and the top layer is not painted through its ancestors' filters
+— but it **is** painted through its own. Verified in Chrome. Without those
+rules, a fullscreen `<video>` would keep the counter-inversion with no root
+inversion left to cancel it and render as a photographic negative, which is the
+single worst thing this feature could do to an extension built for watching
+films. So media in the top layer drops the compensation (keeping its tone curve,
+which is wanted in fullscreen more than anywhere), and a non-media element in
+the top layer takes over the root filter's job so that fullscreening a slideshow
+does not flash the page back to white.
+
+Three more decisions in that stylesheet are worth explaining:
+
+- **`color-scheme: light`, not `dark`, once a page is being inverted.** The UA
+  widgets are about to be flipped, so they have to be drawn light in order to
+  end up dark. Asking for a dark scheme here is the one thing that would make a
+  form control glow on a black page. It also keeps re-measurement stable: under
+  `light` an undeclared canvas really is white, which is the truth, so the
+  verdict stays where it is instead of oscillating every two seconds.
+- **The counter-inversion is appended to the image and video engines' own
+  rules**, not written as a rule of its own. `filter` is a single property, so
+  two rules cannot merge — only one can win. The image engine already owns
+  `img { filter: … }` and the video engine owns `video[data-nn-tone="1"]`, so
+  they carry it, and the zero-specificity `:where(…)` rule covers exactly the
+  media those engines are not currently handling.
+- **`iframe` is counter-inverted** because every frame runs its own copy of the
+  engine. A nested document decides for itself and inverts itself if it needs
+  to, so inverting it again from the parent would cancel it back to white.
+- **`html` and `body` are excluded from the fullscreen stand-in rule**, because
+  Chrome matches them as part of the fullscreen stack. Re-filtering `:root` is
+  harmless — same value, and `filter` does not stack across rules — but a filter
+  on `body` would make it a containing block for fixed descendants, which only
+  the root element is exempt from.
+
+**A filter on the root element does not break `position: fixed`.** That is the
+one thing that would have sunk this approach, and it is a documented exception:
+a filter creates a containing block for fixed and absolutely positioned
+descendants *unless the element is the document root*. Verified in Chrome, and
+`npm run smoke` asserts it on a real page with the viewport scrolled 1847 px
+down.
+
+**What this is not.** The filter approach is the cheap, universal one: it works
+on any site with no knowledge of its CSS, it cannot break a layout, and it costs
+one compositor pass. What it cannot do is choose colours. Extensions built
+primarily for forced dark mode — Dark Reader, Midnight Lizard, Night Eye — spend
+most of their code on the other approach: read the page's stylesheets and
+computed styles, classify every colour as background, text or border, and inject
+overrides that clamp lightness into a configured range. That buys exact control
+over the background and text colours, leaves images alone by construction, and
+keeps shadows and semi-transparent overlays sane. It costs a CSSOM pass over
+every stylesheet, re-running on DOM and style mutations, and a long tail of
+site-specific breakage. Dark Reader ships both, and calls them *Dynamic* and
+*Filter*; this is the second one, with a softened output range. Doing the first
+properly is a much larger project than this feature.
 
 ---
 
@@ -892,6 +1165,47 @@ Consequences:
   `<audio>` element is treated as music and left uncompressed, and a music service
   not on the list that streams a real video track is compressed like a film. There
   is no reliable metadata for this; the toggle exists because of that.
+- **Dark mode's polite half rarely wins.** `color-scheme: dark` cannot flip
+  `prefers-color-scheme`, so a site whose dark theme sits behind that media
+  query will not answer it and will be inverted instead. See
+  [Dark mode](#dark-mode). What answers the request is a page with no background
+  of its own, or one using `light-dark()` or system colours.
+- **Inversion is a blunt instrument, and it is the fallback for a reason.**
+  A CSS `background-image` — a hero photo, a sprite sheet, a texture — is
+  inverted along with the box it sits in, because there is no element to exempt
+  without restyling the page's own boxes. `<canvas>` and inline `<svg>` are
+  deliberately *not* counter-inverted either: they are far more often a chart or
+  an icon, which should go dark with the page, than a photograph. Shadows,
+  translucent overlays and colour-keyed UI can all come out looking wrong.
+- **Nothing on an inverted page can be pure black or pure white, media
+  included.** The softened output range is applied by the root filter, and an
+  element filter cannot emit values outside 0..1 to escape it. In practice that
+  means a photograph's black point sits at `#121212` and its white at `#dbdbdb`
+  — the same band as the page around it. Detail is preserved (it is a linear
+  scale, not a clip), but a letterboxed video's bars are dark grey rather than
+  black.
+- **A frame that has no content script is not inverted.** Every frame handles
+  itself, so `iframe` is exempted from the parent's inversion — which means an
+  embedded document the extension cannot reach (anything outside `http`/`https`,
+  or a frame that failed to initialise) stays at its original brightness on an
+  otherwise dark page.
+- **There can still be a flash before the verdict lands.** The content script
+  runs at `document_start`, and a page cannot be measured before it has a body.
+  The polite request goes in immediately, which means a page painting no
+  background of its own is dark from the first frame; one that declares white
+  is not, at least until the measurement catches up. That measurement no longer
+  waits for `DOMContentLoaded` — a `MutationObserver` fires it the instant
+  `<body>` is inserted, which on most pages is at or before first paint, since a
+  render-blocking stylesheet in `<head>` has already run by then. A page whose
+  background arrives later still (an async stylesheet, a theme switcher) is
+  caught by the same `DOMContentLoaded`/upkeep fallback as before.
+- **A root filter puts the whole page on a composited layer.** That is free on
+  most pages and is not free on all of them. If a heavy page stutters, Dark mode
+  is the first thing to try turning off.
+- **The "is it already dark?" test looks at the page background only.** A site
+  with a dark chrome and a white content pane reads as dark and is left alone,
+  which is the wrong answer for the pane you are reading. There is no cheap
+  measurement that gets this right.
 - **Per-site skipping is by hostname, not by URL.** There is no "skip this one
   video" or "skip this path", and the extension deliberately never sees the path.
 - **Chrome-owned pages** (`chrome://`, the Web Store, other extensions) cannot be
@@ -910,8 +1224,15 @@ Consequences:
   buffer, reduced to four numbers, and thrown away. They are never stored,
   transmitted, or exposed to the page.
 - **What is stored on disk:** your settings, in `chrome.storage.sync` — the master
-  switch, the strength values, the audio/video/image/night-EQ/music toggles, the night
-  window, and the list of hostnames you have chosen to skip. Nothing else.
+  switch, the two strength values, the audio/night-EQ/music/video/image/dark-mode
+  toggles, the night window, and the list of hostnames you have chosen to skip.
+  Nothing else.
+- **The dark-mode probe reads two colours and keeps neither.** Working out
+  whether a page is already dark means reading the computed background of the
+  root element and the body, turning them into one luminance figure, and
+  throwing them away. No page content is inspected, nothing is stored, and the
+  verdict never leaves the frame except as the word `scheme` or `invert` in the
+  status the popup shows you.
 - **What is held in memory:** short-lived per-frame status summaries and the latest
   ambient light reading, in `chrome.storage.session`, which is memory-only, dropped
   when the tab closes and cleared when Chrome exits. Each summary carries counts,
@@ -960,7 +1281,7 @@ Chrome will then only inject the content script on those sites.
 
 ## Testing
 
-Unit tests (`npm test`, 340 tests) cover the strength → parameter mapping
+Unit tests (`npm test`, 438 tests) cover the strength → parameter mapping
 (including the night EQ and the transfer model the popup plots), tone-curve maths
 and adaptation behaviour (including sampling-rate-independent flash and
 scene-change detection), the frame-skip control law, the safety clipper, media
@@ -975,7 +1296,16 @@ enough not to wrap), the SVG filter's DOM handling under jsdom (including the
 `<base href>` workaround and fullscreen re-parenting), and the status reporter's
 throttling.
 
-The end-to-end suite (`npm run smoke`, 70 checks) drives real headless Chrome
+Dark mode has two suites of its own. The pure one pins the CSS colour parser,
+canvas luminance against real sites' background colours, the softened inversion's
+two endpoints and the contrast ratios they produce, and the property that matters
+most — that the counter-filter applied to media is exactly the inversion and
+nothing else. The jsdom one drives the engine: that an already-dark page is not
+inverted, that a light one is, that the verdict does not oscillate when
+re-measured under the other colour scheme, that it follows a page which changes
+its background later, and that switching off leaves no root filter behind.
+
+The end-to-end suite (`npm run smoke`, 91 checks) drives real headless Chrome
 over the DevTools protocol: it installs the built extension, plays generated
 media, and asserts that the filter is applied, that the curve *changes across a
 scene change*, that **screenshotted pixels** show lifted shadows and compressed
@@ -984,11 +1314,23 @@ then released, that the analysis cost stays small, that the audio graph engages,
 that settings apply live, that nested frames are covered, and that no console
 errors are produced.
 
+It covers dark mode against rendered pixels too: that the bench page — which is
+already dark — is left to its own presentation, that making it light causes the
+upkeep loop to invert it without a reload, that the image and video rules carry
+the counter-inversion so photographs are not negatives, that a `position: fixed`
+element stays pinned under a root filter with the page scrolled 1847 px down,
+and that a white overlay renders at mean luma 0.071 inverted against 1.000 with
+the switch off.
+
 It also checks the newer behaviour end to end: that the night EQ moves the bands
-it claims to and stays flat at strength 0, that separating the sliders really does
-bypass one half while the other keeps working, that a skipped site is left
-completely alone, that the toolbar badge distinguishes "off" from "skipped", and
-that the popup's per-site button names the real host and writes the exclusion.
+it claims to and stays flat at strength 0, that each panel's slider bypasses its
+own half while the other keeps working, that the popup opens on one switch and
+one slider per panel with everything else behind its disclosure and that both
+tiers hold exactly their own controls, that the picture switch drives both halves
+of the path and follows them back, that a stored settings object from before the reorganisation
+is migrated rather than carried along, that a skipped site is left completely
+alone, that the toolbar badge distinguishes "off" from "skipped", and that the
+popup's per-site button names the real host and writes the exclusion.
 
 The night and music gates are checked the same way, against a window shifted
 relative to the machine's actual clock: outside it nothing is marked or
@@ -1032,6 +1374,7 @@ src/
     gate.ts                the single "should this frame do anything" decision
     schedule.ts            night-window clock arithmetic
     ambient.ts             lux -> dark/bright, plus the shared reading store
+    page.ts                canvas luminance, the dark-mode plan and its CSS
     music.ts               music host + audio-only element heuristics
     readings.ts            plain-language descriptions of the current effect
     media-origin.ts        Web Audio cross-origin safety classification
@@ -1045,6 +1388,7 @@ src/
     audio-engine.ts        Web Audio chain, probes, rollback
     video-engine.ts        frame measurement + adaptation loop
     image-engine.ts        the fixed <img> curve (no measurement, no discovery)
+    page-engine.ts         root filter + the "is this page already dark?" probe
     tone-filter.ts         SVG filter + CSS rule management
     status-reporter.ts     throttled status push
   background/

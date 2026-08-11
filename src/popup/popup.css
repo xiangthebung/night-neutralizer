@@ -1,6 +1,11 @@
 /*
  * Deliberately low-contrast, warm-accented dark UI: the popup itself should not
  * be the brightest thing on screen at 1 a.m.
+ *
+ * The front of the popup is three cards and a sentence, so the density that
+ * used to be necessary is not any more: rows are spaced for reading rather than
+ * packed to a 600 px budget, and the budget is met by hiding the seldom-touched
+ * controls behind a disclosure instead of by shaving pixels off every row.
  */
 :root {
   color-scheme: dark;
@@ -16,7 +21,7 @@
   --warn: #e0b061;
   --idle: #4d5871;
   --focus: #8fb4ff;
-  --radius: 10px;
+  --radius: 12px;
   /* The popup's one true width. Used by the document and the column alike, so
      the two cannot drift and leave a gap Chrome will happily fill. */
   --app-width: 330px;
@@ -59,90 +64,12 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/*
- * Chrome caps a popup at 600 CSS px tall and scrolls past that, so the layout
- * budget is real: the density here is chosen to fit the whole panel, including
- * the per-site button when it appears, without a scrollbar.
- */
 .app {
   width: var(--app-width);
-  padding: 10px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-
-/* ---------- header ---------- */
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.moon {
-  position: relative;
-  flex: none;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: radial-gradient(circle at 35% 35%, #f6dfae, #d9a95f);
-  box-shadow: 0 0 12px rgba(232, 189, 124, 0.28);
-}
-
-.moon::after {
-  content: "";
-  position: absolute;
-  inset: -3px -8px 2px 8px;
-  border-radius: 50%;
-  background: var(--bg);
-}
-
-h1 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-/* ---------- cards ---------- */
-
-.card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 7px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-}
-
-.row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
   gap: 8px;
-}
-
-.title {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.value {
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  color: var(--accent);
 }
 
 /* Available to screen readers, takes no layout space. */
@@ -158,73 +85,123 @@ h1 {
   border: 0;
 }
 
-/*
- * Live previews of both halves of the effect. Two columns rather than one, so
- * the audio side is as legible as the video side: a slider labelled "45" says
- * nothing about what it does to a quiet line of dialogue.
- */
-.previews {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+/* ---------- header ---------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 2px 0;
 }
 
-.preview {
+h1 {
   margin: 0;
-  min-width: 0;
+  margin-right: auto;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
+.moon {
+  position: relative;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #f6dfae, #d9a95f);
+  box-shadow: 0 0 12px rgba(232, 189, 124, 0.28);
+}
+
+.moon::after {
+  content: "";
+  position: absolute;
+  inset: -3px -8px 2px 8px;
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+/* ---------- one-line summary ---------- */
+
 /*
- * The caption, not the curve, is what tells you what the setting does. An
- * unlabelled curve with "in → out" underneath is legible to whoever wrote it and
- * opaque to everyone else, so these lines state the change in numbers and the
- * graph above them becomes the supporting detail.
+ * The whole tab in one sentence, under the master switch and above the
+ * controls. It sits on the background rather than in a card: it is a readout,
+ * not something to operate, and boxing it would make it compete with the three
+ * things that are.
  */
-.reading {
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0 2px 2px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ---------- cards ---------- */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 11px 12px;
   display: flex;
   flex-direction: column;
-  margin: 3px 0 0;
-  font-size: 10px;
-  line-height: 1.3;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
+  gap: 6px;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+}
+
+.title {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.card-head .title {
+  margin-right: auto;
 }
 
 /*
- * The backing store is twice the layout size, and the drawing code works in
- * logical units, so the curves stay crisp on hidpi displays.
+ * The strength readout is the word, not the number.
+ *
+ * "45 · balanced" made the reader do the translation twice: once from the digit
+ * to the word beside it, and once from the word to what it means for what they
+ * are watching. The digit is still on the slider's own value and in its
+ * `aria-valuetext`, so nothing is lost for anyone who wants it.
  */
-.curve {
-  display: block;
-  width: 100%;
-  height: auto;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #0c111b;
+.value {
+  font-size: 12px;
+  color: var(--accent);
 }
 
-/* ---------- keyboard shortcut hint ---------- */
-
-.shortcut {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin: -2px 0 0;
-  font-size: 11px;
+/*
+ * What the slider does, in words, once per card. It replaces the pair of
+ * decibel captions that used to sit under each graph: those are exact and are
+ * still rendered next to the graph they belong to, downstairs, but "−23 dB" is
+ * not what someone deciding where to put a slider is asking.
+ */
+.card-desc {
+  margin: -2px 0 2px;
+  font-size: 11.5px;
   color: var(--text-dim);
 }
 
-kbd {
-  font: inherit;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  padding: 1px 5px;
-  white-space: nowrap;
+/*
+ * A group whose switch is off keeps its slider legible but visibly inert. Not
+ * `disabled`: setting the strength you want before turning the group on is a
+ * reasonable order to do things in, and there is no reason to forbid it.
+ */
+.card[data-off="true"] .card-desc,
+.card[data-off="true"] input[type="range"],
+.card[data-off="true"] .value {
+  opacity: 0.4;
 }
 
 /* ---------- range ---------- */
@@ -233,13 +210,13 @@ input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
-  height: 20px;
+  height: 22px;
   margin: 0;
   background: transparent;
 }
 
 input[type="range"]::-webkit-slider-runnable-track {
-  height: 4px;
+  height: 6px;
   border-radius: 999px;
   background: linear-gradient(
     90deg,
@@ -253,12 +230,13 @@ input[type="range"]::-webkit-slider-runnable-track {
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   margin-top: -5px;
   border-radius: 50%;
-  background: #f0e2c6;
+  background: #f6efe1;
   border: 1px solid #7a6338;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
   cursor: pointer;
 }
 
@@ -283,20 +261,44 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
 
 .toggle {
   justify-content: space-between;
-  padding: 2px 0;
+  padding: 5px 0;
 }
 
 .toggle + .toggle {
   border-top: 1px solid var(--line);
 }
 
+.toggle-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.toggle-name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
 /*
- * Two switches sharing one row: Video and Images, the two halves of the picture
- * path. A fifth full-width switch would have cost 26 px, and the popup's whole
- * height budget is 600 px before Chrome starts scrolling it. Neither name needs
- * an inline hint the way Night EQ does — the tone-curve graph above is the
- * explanation, and it is the same curve for both.
+ * Where a switch needs a note, it sits inline on the same row instead of
+ * costing a second line. Video and Images need none — the tone curve above them
+ * is the explanation, and it is the same curve for both — while Night EQ, whose
+ * name does not say what it does, keeps a description.
  */
+.toggle-hint {
+  margin-left: 7px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-dim);
+}
+
+.toggle-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Two switches sharing one row: Video and Images, the two halves of the
+   picture path. */
 .toggle-row {
   display: flex;
   gap: 14px;
@@ -317,92 +319,12 @@ input[type="range"]:focus-visible::-webkit-slider-thumb {
   border-top: 0;
 }
 
-.switch-label {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.toggle-copy {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.toggle-name {
-  font-size: 12px;
-  font-weight: 600;
-}
-
-/*
- * Where a switch does need a note, it sits inline on the same row instead of
- * costing a second line. Audio and Video need none once the two graphs above are
- * visible — Video and Images have no room for one anyway, sharing a row — and
- * Night EQ, whose name does not say what it does, keeps a full description.
- */
-.toggle-hint {
-  margin-left: 7px;
-  font-size: 10.5px;
-  font-weight: 400;
-  color: var(--text-dim);
-}
-
-.toggle-desc {
-  font-size: 10.5px;
-  color: var(--text-dim);
-}
-
-/* ---------- night window ---------- */
-
-/*
- * The two clock fields sit on one line under the "only at night" switch rather
- * than in labelled rows of their own: the popup has a 600 px height budget and
- * "From 21:00 to 07:00" needs no more explaining than that.
- */
-.window-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--line);
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-input[type="time"] {
-  flex: none;
-  font: inherit;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 2px 4px;
-}
-
-input[type="time"]:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 1px;
-}
-
-/* The spin/clear affordances Chrome adds are dead weight at this size. */
-input[type="time"]::-webkit-calendar-picker-indicator {
-  filter: invert(0.7);
-  cursor: pointer;
-}
-
-@media (forced-colors: active) {
-  input[type="time"] {
-    border-color: ButtonText;
-  }
-}
-
 .switch input,
 .toggle input {
   position: absolute;
   opacity: 0;
-  width: 34px;
-  height: 20px;
+  width: 36px;
+  height: 22px;
   margin: 0;
   cursor: pointer;
 }
@@ -410,23 +332,23 @@ input[type="time"]::-webkit-calendar-picker-indicator {
 .track {
   position: relative;
   flex: none;
-  width: 34px;
-  height: 20px;
+  width: 36px;
+  height: 22px;
   border-radius: 999px;
   background: #202939;
   border: 1px solid var(--line);
-  transition: background 140ms ease, border-color 140ms ease;
+  transition: background 160ms ease, border-color 160ms ease;
 }
 
 .thumb {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   background: #6b7791;
-  transition: transform 140ms ease, background 140ms ease;
+  transition: transform 160ms ease, background 160ms ease;
 }
 
 input:checked ~ .track {
@@ -443,20 +365,230 @@ input:focus-visible ~ .track {
   box-shadow: 0 0 0 3px rgba(143, 180, 255, 0.5);
 }
 
+/* ---------- night window ---------- */
+
+/*
+ * The two clock fields sit on one line under the "only at night" switch rather
+ * than in labelled rows of their own: "From 21:00 to 07:00" needs no more
+ * explaining than that.
+ */
+.window-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+input[type="time"] {
+  flex: none;
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 5px;
+}
+
+input[type="time"]:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.7);
+  cursor: pointer;
+}
+
+@media (forced-colors: active) {
+  input[type="time"] {
+    border-color: ButtonText;
+  }
+}
+
+/* ---------- more options ---------- */
+
+/*
+ * Everything set once and then left alone. Closed, it costs one row; open, it
+ * is allowed to run past Chrome's 600 px cap and scroll, because at that point
+ * scrolling is the consequence of a deliberate click rather than the state the
+ * popup opens in.
+ */
+.more {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.more-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  list-style: none;
+  border-radius: var(--radius);
+}
+
+/* Chrome draws its own triangle unless both of these are said. */
+.more-summary::-webkit-details-marker {
+  display: none;
+}
+
+.more-summary:hover {
+  color: var(--text);
+}
+
+.more-summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.chev {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 160ms ease;
+}
+
+.more[open] .chev {
+  transform: rotate(45deg);
+}
+
+.more-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0 12px 10px;
+}
+
+.sub {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+/* Denser than the front of the popup on purpose: this is a list to scan, not
+   three controls to operate, and it is already past the 600 px cap. */
+.sub .toggle {
+  padding: 3px 0;
+}
+
+.sub-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+/*
+ * The live preview of what a panel's slider does: the graph beside its caption
+ * rather than above it. Stacked, the pair cost 67 px; side by side they cost
+ * the height of the graph alone.
+ */
+.preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+/*
+ * The caption, not the curve, is what tells you what the setting does. An
+ * unlabelled curve with "in → out" beside it is legible to whoever wrote it and
+ * opaque to everyone else, so these lines state the change in numbers and the
+ * graph becomes the supporting detail.
+ */
+.reading {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The backing store is twice the layout size, and the drawing code works in
+ * logical units, so the curves stay crisp on hidpi displays.
+ */
+.curve {
+  display: block;
+  flex: none;
+  width: 112px;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0c111b;
+}
+
+/*
+ * A note belonging to the row above it, for the dark mode switch: the only
+ * control here whose result has to be measured rather than read off a setting.
+ */
+.row-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-dim);
+}
+
+/* ---------- keyboard shortcut hint ---------- */
+
+.shortcut {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+kbd {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
 /* ---------- paused state ---------- */
 
-.app[data-paused="true"] #controls,
-.app[data-paused="true"] .card:not(.status):not(#controls) {
+.app[data-paused="true"] .card,
+.app[data-paused="true"] .more {
   opacity: 0.55;
 }
 
-/* ---------- status ---------- */
+/* ---------- status detail ---------- */
 
 .status-line {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 0 0 4px;
+  margin: 0 0 5px;
   font-size: 11.5px;
   color: var(--text);
 }
@@ -490,36 +622,23 @@ input:focus-visible ~ .track {
   margin: 8px 0 0;
   padding-top: 8px;
   border-top: 1px solid var(--line);
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-dim);
   white-space: pre-line;
 }
 
 /* ---------- per-site exclusion ---------- */
 
-/*
- * The per-site switch shares the status card's title row rather than taking a
- * row of its own, because the popup has a hard 600 px height budget and this
- * button is not worth 30 px of it.
- */
-.status-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
 .site-button {
-  flex: none;
-  max-width: 150px;
-  padding: 3px 7px;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 5px 10px;
   font: inherit;
-  font-size: 10.5px;
-  text-align: right;
+  font-size: 11.5px;
   color: var(--text-dim);
   background: var(--panel-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 999px;
   cursor: pointer;
 }
 
@@ -548,25 +667,22 @@ input:focus-visible ~ .track {
 
 /* ---------- footer ---------- */
 
-/*
- * One row rather than three stacked lines. The privacy note and the reset link
- * are both short, and the popup's height budget is better spent on the controls.
- */
 .footer {
   display: flex;
-  flex-direction: row;
   align-items: baseline;
   flex-wrap: wrap;
   column-gap: 8px;
   row-gap: 2px;
+  padding: 0 2px;
 }
 
 .link-button {
+  align-self: flex-start;
   background: none;
   border: none;
   padding: 2px 0;
   font: inherit;
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-dim);
   cursor: pointer;
   text-decoration: underline;
@@ -583,19 +699,14 @@ input:focus-visible ~ .track {
   border-radius: 4px;
 }
 
-.link-button.wide {
-  align-self: flex-start;
-  font-size: 11px;
-}
-
 .privacy {
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--idle);
 }
 
 /* Transient confirmation for actions with no other visible result. */
 .toast {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--accent);
 }
 
@@ -667,11 +778,17 @@ input:focus-visible ~ .track {
     color: HighlightText;
   }
 
-  /* Opacity is the only cue for the paused state, and it survives
-     forced-colors poorly. Say it in text instead. */
-  .app[data-paused="true"] #controls,
-  .app[data-paused="true"] .card:not(.status):not(#controls) {
+  /* Opacity is the only cue for these two states, and it survives
+     forced-colors poorly. Say them in the border instead. */
+  .app[data-paused="true"] .card,
+  .app[data-paused="true"] .more {
     opacity: 1;
     border-style: dashed;
+  }
+
+  .card[data-off="true"] .card-desc,
+  .card[data-off="true"] input[type="range"],
+  .card[data-off="true"] .value {
+    opacity: 1;
   }
 }

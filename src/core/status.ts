@@ -8,6 +8,7 @@ import type {
   FrameStatus,
   GateReason,
   GateSource,
+  PageDarkMode,
   TabStatus,
   VideoMode,
 } from './types';
@@ -33,6 +34,13 @@ const GATE_PRIORITY: GateReason[] = ['active', 'off', 'site', 'daylight', 'dayti
 
 const GATE_SOURCE_PRIORITY: GateSource[] = ['sensor', 'clock', 'none'];
 
+/**
+ * Most invasive first, which is also most informative first: if any frame in
+ * the tab is being taken apart and rebuilt, that is what the popup should say,
+ * because that is the one a surprise will have come from.
+ */
+const PAGE_DARK_PRIORITY: PageDarkMode[] = ['invert', 'scheme', 'pending', 'off'];
+
 function pick<T>(values: readonly T[], priority: readonly T[], fallback: T): T {
   for (const candidate of priority) {
     if (values.includes(candidate)) return candidate;
@@ -54,6 +62,7 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
       audio: { state: 'off', processed: 0, skipped: 0 },
       video: { mode: 'off', elements: 0, technique: 'none' },
       images: { active: false, elements: 0 },
+      page: { active: false, dark: 'off' },
       notes: [],
       stale: true,
     };
@@ -67,6 +76,11 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
   // One frame filtering its images is enough to say the tab's pictures are
   // being treated, the same way one frame doing work decides the gate below.
   let imagesActive = false;
+  let pageActive = false;
+  // The strongest treatment any frame is applying: a nested document can be
+  // inverted while the page hosting it was already dark, and the popup should
+  // report the thing that changed rather than the thing that did not.
+  const pageDarkModes: PageDarkMode[] = [];
   let newest = 0;
   // The top frame is authoritative for the site: sub-frames report the same
   // top-level host, but only if `ancestorOrigins` was available to them.
@@ -95,6 +109,10 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
     // right after an update, and it has no `images` at all.
     imageElements += frame.images?.elements ?? 0;
     if (frame.images?.active) imagesActive = true;
+    // Same optional access, and for the same reason: a report written by the
+    // previous version of the content script can still be in session storage.
+    if (frame.page?.active) pageActive = true;
+    if (frame.page) pageDarkModes.push(frame.page.dark);
     newest = Math.max(newest, frame.at);
     audioStates.push(frame.audio.state);
     videoModes.push(frame.video.mode);
@@ -137,6 +155,7 @@ export function aggregateStatuses(frames: readonly FrameStatus[], now = Date.now
       technique: pick(techniques, ['svg-tone-curve', 'css-basic', 'none'], 'none'),
     },
     images: { active: imagesActive, elements: imageElements },
+    page: { active: pageActive, dark: pick(pageDarkModes, PAGE_DARK_PRIORITY, 'off') },
     notes: [...notes],
     stale: now - newest > STATUS_STALE_MS,
   };

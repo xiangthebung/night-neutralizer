@@ -130,6 +130,77 @@ describe('setCurve', () => {
   });
 });
 
+describe('setExtraFilters', () => {
+  it('appends after the tone curve, not before it', () => {
+    // Order is the whole point: the curve is the element's own correction and
+    // the page's inversion is applied to the result of it.
+    const filter = new ToneFilter(document);
+    filter.ensure();
+    filter.setExtraFilters('invert(1) hue-rotate(180deg)');
+    expect(rule()).toContain(
+      `video[${TONE_ATTRIBUTE}="1"]{filter:url("#${FILTER_ID}") invert(1) hue-rotate(180deg) !important;}`,
+    );
+  });
+
+  it('drops the borrowed half, but not the curve, while fullscreen', () => {
+    // The top layer is not painted through its ancestors' filters but is
+    // painted through its own, so in fullscreen there is no root inversion left
+    // for the compensation to cancel — carrying it would render the video as a
+    // negative. The tone curve is this engine's own and stays.
+    const filter = new ToneFilter(document);
+    filter.ensure();
+    filter.setExtraFilters('invert(1) hue-rotate(180deg)');
+    expect(rule()).toContain(
+      `video[${TONE_ATTRIBUTE}="1"]:fullscreen{filter:url("#${FILTER_ID}") !important;}`,
+    );
+  });
+
+  it('writes no fullscreen rule when it is carrying nothing borrowed', () => {
+    const filter = new ToneFilter(document);
+    filter.ensure();
+    filter.setCurve('0 0.5 1', 1);
+    expect(rule()).not.toContain(':fullscreen');
+  });
+
+  it('survives a curve push, which rewrites the rule', () => {
+    const filter = new ToneFilter(document);
+    filter.setExtraFilters('invert(1)');
+    filter.setCurve('0 0.5 1', 1.1);
+    expect(rule()).toContain('invert(1)');
+  });
+
+  it('is dropped again when the page stops needing it', () => {
+    const filter = new ToneFilter(document);
+    filter.ensure();
+    filter.setExtraFilters('invert(1)');
+    filter.setExtraFilters('');
+    expect(rule()).toBe(`video[${TONE_ATTRIBUTE}="1"]{filter:url("#${FILTER_ID}") !important;}`);
+  });
+
+  it('replaces the fallback rather than appending to "none"', () => {
+    // In `css-basic` mode with no approximation set yet, the base value is the
+    // literal `none`, and `filter: none invert(1)` is not a valid declaration.
+    vi.spyOn(CSS, 'supports').mockReturnValue(false);
+    const filter = new ToneFilter(document, { selector: 'img' });
+    filter.ensure();
+    filter.setExtraFilters('invert(1)');
+    expect(rule()).toContain('img{filter:invert(1) !important;}');
+    // Nothing to fall back to in fullscreen either, so the reset is a bare
+    // `none` rather than `filter:none none`.
+    expect(rule()).toContain('img:fullscreen{filter:none !important;}');
+  });
+
+  it('does not touch the DOM when the value is unchanged', () => {
+    const filter = new ToneFilter(document);
+    filter.ensure();
+    filter.setExtraFilters('invert(1)');
+    const node = document.getElementById(STYLE_ID) as HTMLStyleElement;
+    const before = node.textContent;
+    filter.setExtraFilters(' invert(1) ');
+    expect(node.textContent).toBe(before);
+  });
+});
+
 describe('marking', () => {
   it('marks and unmarks video elements', () => {
     const filter = new ToneFilter(document);

@@ -5,7 +5,6 @@ import {
   settingsEqual,
   type ChangeListener,
 } from '../src/core/settings';
-import { audioStrengthOf, videoStrengthOf } from '../src/core/strength';
 import { DEFAULT_SETTINGS, SETTINGS_KEY } from '../src/core/types';
 
 /** Minimal stand-in for a `chrome.storage` area plus its change emitter. */
@@ -62,12 +61,17 @@ describe('sanitizeSettings', () => {
     expect(sanitizeSettings({})).toEqual(DEFAULT_SETTINGS);
   });
 
-  it('clamps and rounds the strength', () => {
-    expect(sanitizeSettings({ strength: -20 }).strength).toBe(0);
-    expect(sanitizeSettings({ strength: 250 }).strength).toBe(100);
-    expect(sanitizeSettings({ strength: 44.6 }).strength).toBe(45);
-    expect(sanitizeSettings({ strength: Number.NaN }).strength).toBe(DEFAULT_SETTINGS.strength);
-    expect(sanitizeSettings({ strength: '70' }).strength).toBe(DEFAULT_SETTINGS.strength);
+  it('clamps and rounds both strengths', () => {
+    expect(sanitizeSettings({ audioStrength: -20 }).audioStrength).toBe(0);
+    expect(sanitizeSettings({ videoStrength: 250 }).videoStrength).toBe(100);
+    expect(sanitizeSettings({ audioStrength: 44.6 }).audioStrength).toBe(45);
+    expect(sanitizeSettings({ videoStrength: 61.5 }).videoStrength).toBe(62);
+    expect(sanitizeSettings({ audioStrength: Number.NaN }).audioStrength).toBe(
+      DEFAULT_SETTINGS.audioStrength,
+    );
+    expect(sanitizeSettings({ videoStrength: '70' }).videoStrength).toBe(
+      DEFAULT_SETTINGS.videoStrength,
+    );
   });
 
   it('coerces non-boolean flags to defaults', () => {
@@ -81,6 +85,15 @@ describe('sanitizeSettings', () => {
     const legacy = { enabled: true, strength: 45, audio: true, video: true };
     expect(sanitizeSettings(legacy).images).toBe(true);
     expect(sanitizeSettings({ images: false }).images).toBe(false);
+  });
+
+  it('leaves dark mode off for settings written before it existed', () => {
+    // The opposite migration from `images`, and deliberately so: inverting a
+    // page changes how a site looks on purpose, so it must never arrive with an
+    // update on someone who did not ask for it.
+    const legacy = { enabled: true, strength: 45, audio: true, video: true, images: true };
+    expect(sanitizeSettings(legacy).darkMode).toBe(false);
+    expect(sanitizeSettings({ darkMode: true }).darkMode).toBe(true);
   });
 
   it('defaults to running only at night, 21:00 to 07:00', () => {
@@ -110,37 +123,6 @@ describe('sanitizeSettings', () => {
     });
   });
 
-  it('migrates pre-split settings by mirroring strength into both channels', () => {
-    // Exactly what an existing user's stored object looks like.
-    const migrated = sanitizeSettings({ enabled: true, strength: 70, audio: true, video: true });
-    expect(migrated.linked).toBe(true);
-    expect(migrated.audioStrength).toBe(70);
-    expect(migrated.videoStrength).toBe(70);
-    expect(migrated.nightEq).toBe(false);
-    expect(migrated.disabledSites).toEqual([]);
-    // The night restriction and the music exemption are new behaviour that an
-    // existing install picks up on update, so the defaults have to be deliberate.
-    expect(migrated.nightOnly).toBe(true);
-    expect(migrated.skipMusic).toBe(true);
-  });
-
-  it('keeps per-channel strengths independent once they exist', () => {
-    const split = sanitizeSettings({
-      strength: 45,
-      linked: false,
-      audioStrength: 90,
-      videoStrength: 10,
-    });
-    expect(split.audioStrength).toBe(90);
-    expect(split.videoStrength).toBe(10);
-  });
-
-  it('clamps and rounds the per-channel strengths too', () => {
-    expect(sanitizeSettings({ audioStrength: -5 }).audioStrength).toBe(0);
-    expect(sanitizeSettings({ videoStrength: 140 }).videoStrength).toBe(100);
-    expect(sanitizeSettings({ audioStrength: 61.5 }).audioStrength).toBe(62);
-  });
-
   it('cleans up the exclusion list', () => {
     const result = sanitizeSettings({
       disabledSites: ['WWW.Example.COM', 'example.com', 'bad:8080', '', 42, 'x.test.'],
@@ -156,50 +138,90 @@ describe('sanitizeSettings', () => {
   });
 });
 
-describe('effective strength', () => {
-  it('uses the master value while linked', () => {
+/*
+ * The settings that used to exist. A synced profile keeps whatever was last
+ * written to it, so an install that has not been opened since the reorganisation
+ * still has the old shape sitting in storage, and it has to arrive at the new
+ * one without the user noticing anything except the popup's new layout.
+ */
+describe('migrating from the old shape', () => {
+  it('takes the shared slider as both strengths', () => {
+    // What a linked install — the default, so most of them — looks like.
+    const migrated = sanitizeSettings({
+      enabled: true,
+      strength: 70,
+      linked: true,
+      audio: true,
+      video: true,
+    });
+    expect(migrated.audioStrength).toBe(70);
+    expect(migrated.videoStrength).toBe(70);
+  });
+
+  it('keeps the two strengths of an install that had already separated them', () => {
+    const split = sanitizeSettings({
+      strength: 45,
+      linked: false,
+      audioStrength: 90,
+      videoStrength: 10,
+    });
+    expect(split.audioStrength).toBe(90);
+    expect(split.videoStrength).toBe(10);
+  });
+
+  it('honours the per-channel values even where `linked` said otherwise', () => {
+    // `linked` is gone, and with it any way to mean "ignore these two". They
+    // were kept in step while linked, so taking them at face value is right in
+    // both cases and needs no reconstruction of a mode that no longer exists.
     const linked = sanitizeSettings({
       strength: 60,
       linked: true,
       audioStrength: 10,
       videoStrength: 90,
     });
-    expect(audioStrengthOf(linked)).toBe(60);
-    expect(videoStrengthOf(linked)).toBe(60);
+    expect(linked.audioStrength).toBe(10);
+    expect(linked.videoStrength).toBe(90);
   });
 
-  it('uses the per-channel values once unlinked', () => {
-    const split = sanitizeSettings({
-      strength: 60,
-      linked: false,
-      audioStrength: 10,
-      videoStrength: 90,
-    });
-    expect(audioStrengthOf(split)).toBe(10);
-    expect(videoStrengthOf(split)).toBe(90);
+  it('carries dark mode over from its old name', () => {
+    expect(sanitizeSettings({ pageDark: true }).darkMode).toBe(true);
+    expect(sanitizeSettings({ pageDark: false }).darkMode).toBe(false);
+    // The new name wins where both are present, which is what a downgrade and
+    // re-upgrade through a synced profile would produce.
+    expect(sanitizeSettings({ pageDark: true, darkMode: false }).darkMode).toBe(false);
+  });
+
+  it('drops the settings that no longer exist rather than carrying them along', () => {
+    const cleaned = sanitizeSettings({ strength: 70, linked: false, pageColor: true });
+    expect(cleaned).not.toHaveProperty('strength');
+    expect(cleaned).not.toHaveProperty('linked');
+    expect(cleaned).not.toHaveProperty('pageColor');
   });
 });
 
 describe('settingsEqual', () => {
   it('compares by value', () => {
     expect(settingsEqual({ ...DEFAULT_SETTINGS }, { ...DEFAULT_SETTINGS })).toBe(true);
-    expect(settingsEqual({ ...DEFAULT_SETTINGS }, { ...DEFAULT_SETTINGS, strength: 10 })).toBe(
+    expect(settingsEqual({ ...DEFAULT_SETTINGS }, { ...DEFAULT_SETTINGS, audioStrength: 10 })).toBe(
       false,
     );
   });
 
-  it('notices every field, including the new ones', () => {
+  it('notices every field', () => {
     const base = sanitizeSettings({});
     for (const patch of [
-      { linked: false },
+      { enabled: false },
+      { audio: false },
       { audioStrength: 1 },
-      { videoStrength: 1 },
-      { images: false },
       { nightEq: true },
+      { skipMusic: false },
+      { video: false },
+      { images: false },
+      { videoStrength: 1 },
+      { darkMode: true },
       { nightOnly: false },
       { nightStart: 1 },
       { nightEnd: 1 },
-      { skipMusic: false },
       { disabledSites: ['example.com'] },
     ]) {
       expect(settingsEqual(base, sanitizeSettings({ ...base, ...patch }))).toBe(false);
@@ -229,30 +251,30 @@ describe('SettingsStore', () => {
   });
 
   it('persists a patch and merges it with existing values', async () => {
-    await store.save({ strength: 80 });
+    await store.save({ audioStrength: 80 });
     await store.save({ audio: false });
 
     const loaded = await store.load();
-    expect(loaded).toEqual({ ...DEFAULT_SETTINGS, strength: 80, audio: false });
+    expect(loaded).toEqual({ ...DEFAULT_SETTINGS, audioStrength: 80, audio: false });
     expect(storage.data.get(SETTINGS_KEY)).toEqual(loaded);
   });
 
   it('survives a round-trip through a fresh store instance', async () => {
-    await store.save({ enabled: false, strength: 12, video: false });
+    await store.save({ enabled: false, videoStrength: 12, video: false });
     const other = new SettingsStore(storage.area, storage.emitter, 'sync');
     await expect(other.load()).resolves.toEqual({
       ...DEFAULT_SETTINGS,
       enabled: false,
-      strength: 12,
+      videoStrength: 12,
       video: false,
     });
   });
 
   it('sanitizes on the way in and on the way out', async () => {
-    await store.save({ strength: 999 } as never);
-    expect((storage.data.get(SETTINGS_KEY) as { strength: number }).strength).toBe(100);
+    await store.save({ audioStrength: 999 } as never);
+    expect((storage.data.get(SETTINGS_KEY) as { audioStrength: number }).audioStrength).toBe(100);
 
-    storage.data.set(SETTINGS_KEY, { strength: 'boom', enabled: 1 });
+    storage.data.set(SETTINGS_KEY, { audioStrength: 'boom', enabled: 1 });
     await expect(store.load()).resolves.toEqual(DEFAULT_SETTINGS);
   });
 
@@ -264,14 +286,14 @@ describe('SettingsStore', () => {
   it('seeds defaults only once', async () => {
     await store.ensureDefaults();
     expect(storage.writes).toBe(1);
-    await store.save({ strength: 5 });
+    await store.save({ audioStrength: 5 });
     await store.ensureDefaults();
     expect(storage.writes).toBe(2); // no extra write from ensureDefaults
-    await expect(store.load()).resolves.toMatchObject({ strength: 5 });
+    await expect(store.load()).resolves.toMatchObject({ audioStrength: 5 });
   });
 
   it('resets to defaults', async () => {
-    await store.save({ enabled: false, strength: 0 });
+    await store.save({ enabled: false, audioStrength: 0 });
     await expect(store.reset()).resolves.toEqual(DEFAULT_SETTINGS);
     await expect(store.load()).resolves.toEqual(DEFAULT_SETTINGS);
   });
@@ -280,16 +302,16 @@ describe('SettingsStore', () => {
     const seen = vi.fn();
     store.subscribe(seen);
 
-    await store.save({ strength: 33 });
+    await store.save({ videoStrength: 33 });
     expect(seen).toHaveBeenCalledTimes(1);
-    expect(seen).toHaveBeenLastCalledWith({ ...DEFAULT_SETTINGS, strength: 33 });
+    expect(seen).toHaveBeenLastCalledWith({ ...DEFAULT_SETTINGS, videoStrength: 33 });
 
     storage.emitExternal({ enabled: false, strength: 90, audio: false, video: true });
     expect(seen).toHaveBeenLastCalledWith({
       ...DEFAULT_SETTINGS,
       enabled: false,
-      strength: 90,
-      // Settings written without the per-channel values inherit `strength`.
+      // A write in the old shape, from a context that has not updated yet: the
+      // one slider it carries becomes both of ours.
       audioStrength: 90,
       videoStrength: 90,
       audio: false,
@@ -300,7 +322,7 @@ describe('SettingsStore', () => {
   it('ignores changes from other storage areas and other keys', async () => {
     const seen = vi.fn();
     store.subscribe(seen);
-    storage.emitExternal({ strength: 10 }, 'local');
+    storage.emitExternal({ audioStrength: 10 }, 'local');
     expect(seen).not.toHaveBeenCalled();
 
     await storage.area.set({ somethingElse: 1 });

@@ -11,17 +11,16 @@
  */
 import { createChromeSettingsStore, sanitizeSettings, settingsEqual } from '../core/settings';
 import {
-  audioStrengthOf,
   audioTransferDb,
   describeStrength,
   mapAudioStrength,
   mapVideoStrength,
-  videoStrengthOf,
 } from '../core/strength';
 import { describeAudioEffect, describeVideoEffect } from '../core/readings';
+import { describePageEffect } from '../core/page';
 import { isSiteDisabled, toggleSite } from '../core/site';
 import { describeLux } from '../core/ambient';
-import { describeClock, describeWindow, formatClock, parseClock } from '../core/schedule';
+import { describeClock, formatClock, parseClock } from '../core/schedule';
 import { adaptBounds, buildToneCurve } from '../core/tone-curve';
 import { MSG, type StatusQueryResponse } from '../core/messages';
 import type { Settings, TabStatus } from '../core/types';
@@ -34,23 +33,31 @@ const AUDIO_FLOOR_DB = -60;
 
 const store = createChromeSettingsStore();
 
+/** Grouped the way the panels are, so a new control has one obvious home. */
 const el = {
   app: document.getElementById('app') as HTMLElement,
   master: document.getElementById('master') as HTMLInputElement,
-  strength: document.getElementById('strength') as HTMLInputElement,
-  strengthValue: document.getElementById('strength-value') as HTMLOutputElement,
-  linkedRow: document.getElementById('linked-row') as HTMLElement,
-  split: document.getElementById('split') as HTMLElement,
-  linkToggle: document.getElementById('link-toggle') as HTMLButtonElement,
+  summaryDot: document.getElementById('summary-dot') as HTMLElement,
+  summaryText: document.getElementById('summary-text') as HTMLElement,
+  more: document.getElementById('more') as HTMLDetailsElement,
+
+  soundCard: document.getElementById('sound-card') as HTMLElement,
+  audio: document.getElementById('audio') as HTMLInputElement,
   audioStrength: document.getElementById('audio-strength') as HTMLInputElement,
   audioStrengthValue: document.getElementById('audio-strength-value') as HTMLOutputElement,
-  videoStrength: document.getElementById('video-strength') as HTMLInputElement,
-  videoStrengthValue: document.getElementById('video-strength-value') as HTMLOutputElement,
-  audio: document.getElementById('audio') as HTMLInputElement,
-  video: document.getElementById('video') as HTMLInputElement,
-  images: document.getElementById('images') as HTMLInputElement,
   nightEq: document.getElementById('night-eq') as HTMLInputElement,
   skipMusic: document.getElementById('skip-music') as HTMLInputElement,
+
+  pictureCard: document.getElementById('picture-card') as HTMLElement,
+  /** The front-of-popup switch for the whole picture path; not a stored key. */
+  picture: document.getElementById('picture') as HTMLInputElement,
+  video: document.getElementById('video') as HTMLInputElement,
+  images: document.getElementById('images') as HTMLInputElement,
+  videoStrength: document.getElementById('video-strength') as HTMLInputElement,
+  videoStrengthValue: document.getElementById('video-strength-value') as HTMLOutputElement,
+  darkMode: document.getElementById('dark-mode') as HTMLInputElement,
+  pageNote: document.getElementById('page-note') as HTMLElement,
+
   nightOnly: document.getElementById('night-only') as HTMLInputElement,
   nightWindow: document.getElementById('night-window') as HTMLElement,
   nightStart: document.getElementById('night-start') as HTMLInputElement,
@@ -68,7 +75,7 @@ const el = {
   shortcut: document.getElementById('shortcut') as HTMLElement,
   shortcutKeys: document.getElementById('shortcut-keys') as HTMLElement,
   shortcutEdit: document.getElementById('shortcut-edit') as HTMLButtonElement,
-  curve: document.getElementById('curve') as HTMLCanvasElement,
+  videoCurve: document.getElementById('video-curve') as HTMLCanvasElement,
   audioCurve: document.getElementById('audio-curve') as HTMLCanvasElement,
   videoReading1: document.getElementById('video-reading-1') as HTMLElement,
   videoReading2: document.getElementById('video-reading-2') as HTMLElement,
@@ -87,26 +94,47 @@ let settings: Settings = sanitizeSettings({});
 let lastStatus: TabStatus | null = null;
 let strengthTimer: ReturnType<typeof setTimeout> | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+/** Slider moves waiting out the debounce, merged so none is dropped. */
+let pendingWrite: Partial<Settings> = {};
 
 function renderSettings(next: Settings): void {
   settings = next;
   el.master.checked = next.enabled;
+
   el.audio.checked = next.audio;
-  el.video.checked = next.video;
-  el.images.checked = next.images;
+  el.audioStrength.value = String(next.audioStrength);
   el.nightEq.checked = next.nightEq;
   el.skipMusic.checked = next.skipMusic;
+
+  el.video.checked = next.video;
+  el.images.checked = next.images;
+  el.picture.checked = next.video || next.images;
+  el.videoStrength.value = String(next.videoStrength);
+  el.darkMode.checked = next.darkMode;
+
   el.nightOnly.checked = next.nightOnly;
   el.nightStart.value = formatClock(next.nightStart);
   el.nightEnd.value = formatClock(next.nightEnd);
-  el.strength.value = String(next.strength);
-  el.audioStrength.value = String(next.audioStrength);
-  el.videoStrength.value = String(next.videoStrength);
-  renderLinkMode(next.linked);
+
   renderNightWindow();
   renderLabels();
   el.app.dataset.paused = String(!next.enabled);
+  renderCardStates();
   renderSiteToggle();
+  renderSummary();
+}
+
+/**
+ * Dim a panel whose own switch is off.
+ *
+ * The picture panel has no single stored flag to read: its front switch stands
+ * for two, so "off" here means neither half is on. That is also why the front
+ * switch is derived on every render rather than kept as state — the two halves
+ * can be changed independently downstairs, and the switch has to follow them.
+ */
+function renderCardStates(): void {
+  el.soundCard.dataset.off = String(!settings.audio);
+  el.pictureCard.dataset.off = String(!settings.video && !settings.images);
 }
 
 /** The clock fields are only meaningful while the night restriction is on. */
@@ -143,25 +171,24 @@ function renderNightDesc(): void {
     return;
   }
 
+  // The hours themselves are in the two fields directly below this line, so
+  // repeating them here was one reading of the same fact twice.
   el.nightDesc.textContent =
     gate?.source === 'clock'
       ? 'No light sensor here, so the clock decides'
-      : `A dark room, or ${describeWindow(settings.nightStart, settings.nightEnd)}`;
+      : 'A dark room, or the hours below';
 }
 
-/** Show either the single slider or the pair, never both. */
-function renderLinkMode(linked: boolean): void {
-  el.linkedRow.hidden = !linked;
-  el.strength.hidden = !linked;
-  el.split.hidden = linked;
-  el.linkToggle.textContent = linked
-    ? 'Set audio and video separately'
-    : 'Use one slider for both';
-  el.linkToggle.setAttribute('aria-pressed', String(!linked));
-}
-
+/**
+ * The word, not the number.
+ *
+ * "45 · balanced" asked the reader to translate twice: from the digit to the
+ * word beside it, and from the word to what it means for what they are
+ * watching. Only the second translation is useful, and the digit is still on
+ * the slider itself and in its `aria-valuetext` for anyone who wants it.
+ */
 function labelFor(value: number): string {
-  return value === 0 ? 'off' : `${value} · ${describeStrength(value).toLowerCase()}`;
+  return value === 0 ? 'Off' : describeStrength(value);
 }
 
 function paintSlider(slider: HTMLInputElement, out: HTMLOutputElement, value: number): void {
@@ -173,30 +200,44 @@ function paintSlider(slider: HTMLInputElement, out: HTMLOutputElement, value: nu
 }
 
 /**
- * Repaint every label and both thumbnails from the *pending* slider positions,
- * so the graphs track the pointer rather than the last committed write.
+ * Repaint both panels' labels and thumbnails from the *pending* slider
+ * positions, so the graphs track the pointer rather than the last committed
+ * write.
  */
 function renderLabels(): void {
-  const strength = Number(el.strength.value);
-  paintSlider(el.strength, el.strengthValue, strength);
-  paintSlider(el.audioStrength, el.audioStrengthValue, Number(el.audioStrength.value));
-  paintSlider(el.videoStrength, el.videoStrengthValue, Number(el.videoStrength.value));
+  const audio = Number(el.audioStrength.value);
+  const video = Number(el.videoStrength.value);
+  paintSlider(el.audioStrength, el.audioStrengthValue, audio);
+  paintSlider(el.videoStrength, el.videoStrengthValue, video);
 
-  const linked = el.split.hidden;
-  const audio = linked ? strength : Number(el.audioStrength.value);
-  const video = linked ? strength : Number(el.videoStrength.value);
-  drawCurve(video);
   drawAudioCurve(audio, el.nightEq.checked);
+  drawVideoCurve(video);
+
+  const [audioLine1, audioLine2] = describeAudioEffect(audio, el.nightEq.checked);
+  el.audioReading1.textContent = audioLine1;
+  el.audioReading2.textContent = audioLine2;
+  el.audioReading2.hidden = audioLine2 === '';
 
   const [videoLine1, videoLine2] = describeVideoEffect(video);
   el.videoReading1.textContent = videoLine1;
   el.videoReading2.textContent = videoLine2;
   el.videoReading2.hidden = videoLine2 === '';
 
-  const [audioLine1, audioLine2] = describeAudioEffect(audio, el.nightEq.checked);
-  el.audioReading1.textContent = audioLine1;
-  el.audioReading2.textContent = audioLine2;
-  el.audioReading2.hidden = audioLine2 === '';
+  renderPageNote();
+}
+
+/**
+ * The line under the dark mode switch.
+ *
+ * Rendered only while the switch is on, because it exists for the one thing in
+ * the picture panel that a setting cannot tell you: which of the two paths a
+ * page took is a measurement the content script makes, and the two do not look
+ * alike. Every other control here is explained by the graph above it.
+ */
+function renderPageNote(): void {
+  el.pageNote.hidden = !el.darkMode.checked;
+  if (!el.darkMode.checked) return;
+  el.pageNote.textContent = describePageEffect(lastStatus?.page?.dark ?? 'pending');
 }
 
 
@@ -252,8 +293,8 @@ function strokeIdentity(
  * so the thumbnail is the real shape of the effect, and its width is a real
  * indication of how much the curve moves as scenes change.
  */
-function drawCurve(strength: number): void {
-  const frame = plot(el.curve);
+function drawVideoCurve(strength: number): void {
+  const frame = plot(el.videoCurve);
   if (!frame) return;
   const { ctx, x, y } = frame;
 
@@ -363,33 +404,99 @@ function toast(message: string): void {
   }, TOAST_MS);
 }
 
-/** Debounced slider write; the label and graphs update on every input event. */
-function onSliderInput(patch: () => Partial<Settings>): void {
+/**
+ * Debounced slider write; the label and graphs update on every input event.
+ *
+ * Patches accumulate rather than replace, because there are two sliders and one
+ * timer: dragging the sound slider and then the picture slider inside the
+ * debounce window used to write only the second of them.
+ */
+function queueWrite(patch: Partial<Settings>): void {
+  pendingWrite = { ...pendingWrite, ...patch };
   renderLabels();
   if (strengthTimer) clearTimeout(strengthTimer);
   strengthTimer = setTimeout(() => {
     strengthTimer = null;
-    persist(patch());
+    const next = pendingWrite;
+    pendingWrite = {};
+    persist(next);
   }, STRENGTH_WRITE_DEBOUNCE_MS);
 }
 
 el.master.addEventListener('change', () => {
   el.app.dataset.paused = String(!el.master.checked);
   persist({ enabled: el.master.checked });
+  renderSummary();
 });
 
-el.audio.addEventListener('change', () => persist({ audio: el.audio.checked }));
-el.video.addEventListener('change', () => persist({ video: el.video.checked }));
-el.images.addEventListener('change', () => persist({ images: el.images.checked }));
+el.audio.addEventListener('change', () => {
+  persist({ audio: el.audio.checked });
+  renderCardStates();
+  renderSummary();
+});
 el.nightEq.addEventListener('change', () => {
   persist({ nightEq: el.nightEq.checked });
   renderLabels(); // the audio graph shape depends on it
 });
 el.skipMusic.addEventListener('change', () => persist({ skipMusic: el.skipMusic.checked }));
 
+/**
+ * The front switch for the picture, standing for both halves of the path.
+ *
+ * Off means off: neither moving pictures nor stills. On means both, rather
+ * than whichever pair happened to be set last — restoring a remembered
+ * combination would make one switch produce two different results from the
+ * same visible state, and the two halves are one click away downstairs for
+ * anyone who wants them apart.
+ */
+el.picture.addEventListener('change', () => {
+  const on = el.picture.checked;
+  el.video.checked = on;
+  el.images.checked = on;
+  persist({ video: on, images: on });
+  renderCardStates();
+  renderSummary();
+});
+
+el.video.addEventListener('change', () => {
+  persist({ video: el.video.checked });
+  el.picture.checked = el.video.checked || el.images.checked;
+  renderCardStates();
+  renderSummary();
+});
+el.images.addEventListener('change', () => {
+  persist({ images: el.images.checked });
+  el.picture.checked = el.video.checked || el.images.checked;
+  renderCardStates();
+  renderSummary();
+});
+el.darkMode.addEventListener('change', () => {
+  persist({ darkMode: el.darkMode.checked });
+  renderPageNote();
+});
+
 el.nightOnly.addEventListener('change', () => {
   persist({ nightOnly: el.nightOnly.checked });
   renderNightWindow();
+  renderSummary();
+});
+
+/**
+ * Remember whether the disclosure was left open.
+ *
+ * In `localStorage` rather than in settings: it describes this popup on this
+ * machine, not how anything is processed, and syncing it to another profile
+ * would be surprising. Storage can throw when the profile blocks it, and a
+ * disclosure that forgets its state is not worth failing the popup over.
+ */
+const MORE_OPEN_KEY = 'nn:more-open';
+
+el.more.addEventListener('toggle', () => {
+  try {
+    localStorage.setItem(MORE_OPEN_KEY, el.more.open ? '1' : '0');
+  } catch {
+    /* storage unavailable: the disclosure simply opens closed next time */
+  }
 });
 
 /**
@@ -410,38 +517,12 @@ function onClockChange(input: HTMLInputElement, key: 'nightStart' | 'nightEnd'):
 el.nightStart.addEventListener('change', () => onClockChange(el.nightStart, 'nightStart'));
 el.nightEnd.addEventListener('change', () => onClockChange(el.nightEnd, 'nightEnd'));
 
-el.strength.addEventListener('input', () =>
-  onSliderInput(() => {
-    const value = Number(el.strength.value);
-    // Keep the per-channel values in step while linked, so unlinking later
-    // starts from what you were actually listening to.
-    return { strength: value, audioStrength: value, videoStrength: value };
-  }),
-);
 el.audioStrength.addEventListener('input', () =>
-  onSliderInput(() => ({ audioStrength: Number(el.audioStrength.value) })),
+  queueWrite({ audioStrength: Number(el.audioStrength.value) }),
 );
 el.videoStrength.addEventListener('input', () =>
-  onSliderInput(() => ({ videoStrength: Number(el.videoStrength.value) })),
+  queueWrite({ videoStrength: Number(el.videoStrength.value) }),
 );
-
-el.linkToggle.addEventListener('click', () => {
-  const linked = !settings.linked;
-  if (linked) {
-    // Re-linking has to choose one number out of two. The midpoint is the least
-    // surprising option: it is visible in the slider straight away and neither
-    // half jumps to a value the user never chose.
-    const merged = Math.round((settings.audioStrength + settings.videoStrength) / 2);
-    el.strength.value = String(merged);
-    persist({ linked, strength: merged, audioStrength: merged, videoStrength: merged });
-    el.audioStrength.value = String(merged);
-    el.videoStrength.value = String(merged);
-  } else {
-    persist({ linked });
-  }
-  renderLinkMode(linked);
-  renderLabels();
-});
 
 el.reset.addEventListener('click', () => {
   void store.reset().then((next) => {
@@ -543,7 +624,7 @@ function describeAudio(status: TabStatus, current: Settings): [string, string] {
   const night = describeNightGate(status, current);
   if (night) return [`Audio: ${night}`, 'off'];
   if (!current.audio) return ['Audio: turned off', 'off'];
-  if (audioStrengthOf(current) === 0) return ['Audio: bypassed (strength 0)', 'off'];
+  if (current.audioStrength === 0) return ['Audio: bypassed (strength 0)', 'off'];
   if (status.frames === 0) return ['Audio: no media found on this page', 'off'];
 
   switch (status.audio.state) {
@@ -594,7 +675,7 @@ function describePicture(status: TabStatus, current: Settings): [string, string]
   if (status.siteDisabled) return [`Picture: turned off on ${status.site}`, 'off'];
   const night = describeNightGate(status, current);
   if (night) return [`Picture: ${night}`, 'off'];
-  if (videoStrengthOf(current) === 0) return ['Picture: bypassed (strength 0)', 'off'];
+  if (current.videoStrength === 0) return ['Picture: bypassed (strength 0)', 'off'];
   if (status.frames === 0) return ['Picture: not available on this page', 'off'];
 
   const [videoText, videoState] = describeVideoPart(status, current);
@@ -645,6 +726,46 @@ function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
 }
 
+/**
+ * The whole tab in one sentence, for the line under the master switch.
+ *
+ * It is deliberately not a third status line: it answers "is this doing
+ * anything right now", which is the only question most openings of this popup
+ * are asking, and it defers to the two detailed lines — still rendered, in
+ * "More options" — for the part that explains itself only when something is
+ * unexpected. The states come from those same two describers rather than from
+ * a parallel reading of the settings, so the summary cannot contradict the
+ * detail it summarises.
+ */
+function summarize(status: TabStatus | null, current: Settings): [string, string] {
+  if (!current.enabled) return ['Paused', 'off'];
+  if (!status) return ['Nothing to do on this page', 'off'];
+  if (status.siteDisabled) return [`Left alone on ${status.site}`, 'off'];
+
+  const night = describeNightGate(status, current);
+  if (night) return [`${night.charAt(0).toUpperCase()}${night.slice(1)}`, 'off'];
+
+  const pictureOn = current.video || current.images;
+  if (!current.audio && !pictureOn) return ['Sound and picture are both off', 'off'];
+  if (status.frames === 0) return ['Nothing to do on this page', 'off'];
+
+  const [, audioState] = describeAudio(status, current);
+  const [, pictureState] = describePicture(status, current);
+  const working: string[] = [];
+  if (audioState !== 'off') working.push('sound');
+  if (pictureState !== 'off') working.push('picture');
+  if (working.length === 0) return ['Nothing to soften on this page', 'off'];
+
+  const state = audioState === 'partial' || pictureState === 'partial' ? 'partial' : 'active';
+  return [`Softening the ${working.join(' and ')}`, state];
+}
+
+function renderSummary(): void {
+  const [text, state] = summarize(lastStatus, settings);
+  el.summaryText.textContent = text;
+  el.summaryDot.dataset.state = state;
+}
+
 function renderStatus(status: TabStatus | null): void {
   lastStatus = status;
   if (!status) {
@@ -657,6 +778,8 @@ function renderStatus(status: TabStatus | null): void {
       'Browser pages (chrome://, the Web Store, other extensions) cannot be modified by extensions.';
     renderSiteToggle();
     renderNightDesc();
+    renderPageNote();
+    renderSummary();
     return;
   }
 
@@ -671,8 +794,12 @@ function renderStatus(status: TabStatus | null): void {
   el.notes.hidden = notes.length === 0;
   el.notes.textContent = notes.join('\n');
   renderSiteToggle();
+  renderSummary();
   // The sensor readout lives in this status too, so it refreshes on the poll.
   renderNightDesc();
+  // So does which of the two dark-mode paths this tab ended up on, which is a
+  // measurement the content script makes rather than something the popup knows.
+  renderPageNote();
 }
 
 async function activeTabId(): Promise<number | null> {
@@ -708,6 +835,11 @@ async function pollStatus(): Promise<void> {
 }
 
 async function init(): Promise<void> {
+  try {
+    el.more.open = localStorage.getItem(MORE_OPEN_KEY) === '1';
+  } catch {
+    /* storage unavailable: start closed, which is the default anyway */
+  }
   renderSettings(await store.load());
   void renderShortcut();
   void pollStatus();

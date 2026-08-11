@@ -649,23 +649,26 @@ async function main() {
      * players alone, so a suite run at 3 p.m. would otherwise be measuring an
      * extension that is correctly doing nothing. Both are exercised explicitly
      * further down.
+     *
+     * `strength` is not a setting — the popup has one slider per group — but
+     * most assertions here want both of them at the same place, so it is
+     * accepted as shorthand for exactly that.
      */
-    const writeSettings = async (patch) => {
+    const writeSettings = async ({ strength, ...patch } = {}) => {
       const settings = JSON.stringify({
         enabled: true,
-        strength: 45,
-        linked: true,
-        audioStrength: 45,
-        videoStrength: 45,
+        disabledSites: [],
         audio: true,
+        audioStrength: strength ?? 45,
+        nightEq: false,
+        skipMusic: false,
         video: true,
         images: true,
-        nightEq: false,
-        disabledSites: [],
+        videoStrength: strength ?? 45,
+        darkMode: false,
         nightOnly: false,
         nightStart: 21 * 60,
         nightEnd: 7 * 60,
-        skipMusic: false,
         ...patch,
       });
       await sw.eval(`chrome.storage.sync.set({ settings: ${settings} })`);
@@ -1408,10 +1411,189 @@ async function main() {
     });
     check('the badge clears again when switched back on', badgeOn === '(empty)');
 
-    /* -------- split audio/video strength -------- */
-    // One slider cannot express "compress the audio hard, leave the picture
-    // nearly alone", so the two can be separated.
-    await writeSettings({ linked: false, audioStrength: 70, videoStrength: 0 });
+    /* -------- dark mode -------- */
+    /*
+     * The one switch that changes how a *site* looks rather than how its content
+     * is exposed. It is off by default, so nothing above this point has seen it,
+     * and everything below restores that.
+     *
+     * The bench page is already dark (#07090d), which is exactly the case the
+     * polite request exists for: asking for a dark page must not take a dark
+     * page apart.
+     */
+    await writeSettings({ strength: 70, darkMode: true });
+    const alreadyDark = await awaitStatus((s) => s.page?.dark === 'scheme');
+    check(
+      'a page that is already dark is left to its own presentation',
+      alreadyDark?.page?.dark === 'scheme',
+      `dark=${alreadyDark?.page?.dark}`,
+    );
+    const untouched = await page.eval(
+      `document.getElementById('nn-page-style')?.textContent ?? ''`,
+    );
+    check(
+      'and is not inverted',
+      untouched === ':root{color-scheme:dark !important;}',
+      untouched,
+    );
+
+    // Now make the same page light and let the upkeep loop notice, which
+    // exercises the re-measurement rather than just the first verdict.
+    await page.eval(
+      `document.documentElement.style.setProperty('background-color', '#ffffff', 'important'), true`,
+    );
+    const wentLight = await awaitStatus((s) => s.page?.dark === 'invert');
+    check(
+      'a page with no dark theme is inverted instead, without a reload',
+      wentLight?.page?.dark === 'invert',
+      `dark=${wentLight?.page?.dark}`,
+    );
+
+    /*
+     * The part that is easy to get wrong and very visible when it is: `filter`
+     * is one property, so the image and video rules cannot merely coexist with
+     * the page's counter-inversion — they have to carry it themselves, or every
+     * photograph and every frame of video renders as a negative.
+     */
+    const compensation = await page.eval(`JSON.stringify({
+      page: document.getElementById('nn-page-style')?.textContent ?? '',
+      image: document.getElementById('nn-image-tone-style')?.textContent ?? '',
+      video: document.getElementById('nn-tone-style')?.textContent ?? '',
+    })`);
+    const rules = JSON.parse(compensation);
+    check(
+      'media carry the counter-inversion, so photographs are not negatives',
+      rules.image.includes('invert(1) hue-rotate(180deg)') &&
+        rules.video.includes('invert(1) hue-rotate(180deg)') &&
+        rules.image.includes('nn-image-tone-curve') &&
+        rules.video.includes('nn-tone-curve'),
+      `img: ${rules.image} | video: ${rules.video}`,
+    );
+    check(
+      'the page rule also covers media the two engines have not claimed',
+      rules.page.includes(':where(img,video,iframe,embed,object)'),
+      rules.page,
+    );
+
+    /*
+     * Rendered pixels, not just rules. A white probe pinned over the viewport
+     * is the cleanest thing to measure on a bench page otherwise full of live
+     * video, and being `position: fixed` inside a filtered root it also proves
+     * the thing that would have sunk this whole approach: a filter on the root
+     * element does not make fixed descendants scroll away, because the root is
+     * the documented exception to the containing-block rule.
+     */
+    const probeStats = async (colour) => {
+      const raw = await page.eval(`(() => {
+         let probe = document.getElementById('nn-smoke-probe');
+         if (!probe) {
+           probe = document.createElement('div');
+           probe.id = 'nn-smoke-probe';
+           document.body.appendChild(probe);
+         }
+         probe.style.cssText =
+           'position:fixed;left:0;top:0;right:0;bottom:0;z-index:2147483647;background:${colour};';
+         const r = probe.getBoundingClientRect();
+         return JSON.stringify({
+           x: Math.round(r.x + window.scrollX) + 2,
+           y: Math.round(r.y + window.scrollY) + 2,
+           width: Math.round(r.width) - 4,
+           height: Math.round(r.height) - 4,
+           pinnedTo: Math.round(r.y),
+           scrollY: Math.round(window.scrollY),
+         });
+       })()`);
+      const { pinnedTo, scrollY, ...clip } = JSON.parse(raw);
+      await sleep(300);
+      const shot = await page.send(
+        'Page.captureScreenshot',
+        { format: 'png', clip: { ...clip, scale: 1 } },
+        30_000,
+      );
+      return {
+        ...lumaStats(await decodePng(Buffer.from(shot.data, 'base64'))),
+        pinnedTo,
+        scrollY,
+      };
+    };
+
+    const invertedWhite = await probeStats('#ffffff');
+    check(
+      'a filter on the root element does not break position: fixed',
+      invertedWhite.pinnedTo === 0,
+      `probe sits at viewport y=${invertedWhite.pinnedTo} with the page scrolled to ${invertedWhite.scrollY}`,
+    );
+
+    /*
+     * The two ends of the softened inversion, measured rather than derived. A
+     * straight inversion would put these at 0.000 and 1.000; the whole point of
+     * the squeeze is that they land inside that, so a white page becomes a
+     * slight grey and black text becomes an off-white rather than a glare.
+     */
+    check(
+      'an inverted white page lands on a slight grey, not pure black',
+      invertedWhite.mean > 0.04 && invertedWhite.mean < 0.11,
+      `mean luma ${invertedWhite.mean.toFixed(3)} (#121212 is 0.071)`,
+    );
+
+    const invertedBlack = await probeStats('#000000');
+    check(
+      'and inverted black text lands below pure white',
+      invertedBlack.mean > 0.80 && invertedBlack.mean < 0.92,
+      `mean luma ${invertedBlack.mean.toFixed(3)} (#dbdbdb is 0.859)`,
+    );
+
+    /*
+     * The rules that keep a fullscreen video from rendering as a negative. A
+     * top-layer element is not painted through its ancestors' filters but is
+     * painted through its own, so the counter-inversion has to come off it and
+     * a non-media element has to take over the root filter's job.
+     */
+    check(
+      'fullscreen media drops the counter-inversion it has nothing to cancel',
+      rules.page.includes(':fullscreen{filter:none !important;}') &&
+        rules.video.includes(`video[data-nn-tone="1"]:fullscreen{filter:url(`) &&
+        !/:fullscreen\{filter:url\([^)]*\) invert/.test(rules.video),
+      rules.video,
+    );
+    check(
+      'a fullscreen element that is not media takes over the root filter',
+      /:fullscreen:not\(:where\(html,body,[^)]*\)\)\{filter:[^}]*invert/.test(rules.page),
+      rules.page,
+    );
+
+    await page.eval(
+      `document.documentElement.style.removeProperty('background-color'), true`,
+    );
+    await writeSettings({ strength: 70 });
+    const pageCleared = await waitFor('page style removed', async () => {
+      const gone = await page.eval(
+        `!document.getElementById('nn-page-style') &&
+         !/invert/.test(document.getElementById('nn-image-tone-style')?.textContent ?? '')`,
+      );
+      return gone === true;
+    });
+    check(
+      'switching dark mode off leaves no root filter and no counter-inversion behind',
+      pageCleared === true,
+    );
+
+    // The control for the measurements above: the same white overlay, with the
+    // treatment off, has to come back white. Without this the pixel checks would
+    // pass on any screenshot that happened to be dark.
+    const restoredProbe = await probeStats('#ffffff');
+    check(
+      'and the page renders at its own brightness again',
+      restoredProbe.mean > 0.99,
+      `the same overlay renders at mean luma ${restoredProbe.mean.toFixed(3)}`,
+    );
+    await page.eval(`document.getElementById('nn-smoke-probe')?.remove(), true`);
+
+    /* -------- one slider per group -------- */
+    // Sound and Picture are separate panels with separate sliders, because
+    // "compress the audio hard, leave the picture nearly alone" is an ordinary
+    // preference that one slider cannot express.
+    await writeSettings({ audioStrength: 70, videoStrength: 0 });
     const videoOnlyBypassed = await waitFor('video bypassed while audio runs', async () => {
       const marked = await page.eval(
         `document.querySelectorAll('video[data-nn-tone="1"]').length`,
@@ -1428,7 +1610,7 @@ async function main() {
         : 'never reached that state',
     );
 
-    await writeSettings({ linked: false, audioStrength: 0, videoStrength: 70 });
+    await writeSettings({ audioStrength: 0, videoStrength: 70 });
     const audioOnlyBypassed = await awaitStatus(
       (s) => s.audio.state === 'off' && s.video.mode !== 'off',
     );
@@ -1626,23 +1808,44 @@ async function main() {
     await sleep(800);
     const popupState = await popup.eval(
       `(() => ({
-          strength: document.getElementById('strength').value,
-          label: document.getElementById('strength-value').textContent,
+          audioStrength: document.getElementById('audio-strength').value,
+          audioLabel: document.getElementById('audio-strength-value').textContent,
+          videoStrength: document.getElementById('video-strength').value,
+          videoLabel: document.getElementById('video-strength-value').textContent,
           master: document.getElementById('master').checked,
           audio: document.getElementById('audio').checked,
+          nightEq: document.getElementById('night-eq').checked,
+          skipMusic: document.getElementById('skip-music').checked,
           video: document.getElementById('video').checked,
           images: document.getElementById('images').checked,
-          nightEq: document.getElementById('night-eq').checked,
+          darkMode: document.getElementById('dark-mode').checked,
           audioStatus: document.getElementById('audio-status').textContent,
           pictureStatus: document.getElementById('picture-status').textContent,
           shortcutShown: !document.getElementById('shortcut').hidden,
           shortcutKeys: document.getElementById('shortcut-keys').textContent,
-          splitShown: !document.getElementById('split').hidden,
           nightOnly: document.getElementById('night-only').checked,
           nightStart: document.getElementById('night-start').value,
           nightEnd: document.getElementById('night-end').value,
           nightWindowShown: !document.getElementById('night-window').hidden,
-          skipMusic: document.getElementById('skip-music').checked,
+          summary: document.getElementById('summary-text').textContent,
+          moreOpen: document.getElementById('more').open,
+          // Every control, in the order the panels put them in: a switch that
+          // ends up in the wrong panel is exactly the thing this organisation
+          // was for, and it is invisible to a check that only reads by id.
+          //
+          // Two lists, because there are now two tiers: what the popup opens
+          // at, and what "More options" holds. A control migrating between
+          // them is the regression this pair is watching for.
+          layout: [...document.querySelectorAll('#sound-card, #picture-card')].map((card) => [
+            card.querySelector('.title').textContent,
+            ...[...card.querySelectorAll('input')].map((input) => input.id),
+          ].join(',')),
+          moreLayout: [...document.querySelectorAll('.sub')]
+            .map((sub) => [
+              sub.querySelector('.sub-title')?.textContent ?? '',
+              ...[...sub.querySelectorAll('input')].map((input) => input.id),
+            ].join(','))
+            .filter((row) => row.includes(',')),
        }))()`,
     );
     // The hint must show the *real* accelerator and must stay hidden when there
@@ -1657,9 +1860,66 @@ async function main() {
         ? `shows "${popupState.shortcutKeys}"`
         : 'no accelerator bound in this profile, so the hint stays hidden',
     );
+    // The front of the popup is one switch and one slider per thing being
+    // treated, and nothing else: everything that is decided once and then left
+    // alone belongs behind the disclosure.
     check(
-      'popup starts in linked mode with the split sliders hidden',
-      popupState.splitShown === false,
+      'the popup opens on one switch and one slider per panel',
+      popupState.layout[0] === 'Sound,audio,audio-strength' &&
+        popupState.layout[1] === 'Picture,picture,video-strength' &&
+        popupState.moreOpen === false,
+      `${popupState.layout.join(' | ')} (more open=${popupState.moreOpen})`,
+    );
+    // And each panel's seldom-touched controls stay with that panel downstairs
+    // rather than pooling into one undifferentiated list of switches.
+    check(
+      'more options keeps each panel’s own settings with it',
+      popupState.moreLayout[0] === 'Sound,night-eq,skip-music' &&
+        popupState.moreLayout[1] === 'Picture,video,images,dark-mode',
+      popupState.moreLayout.join(' | '),
+    );
+
+    // The front switch stands for both halves of the picture path. Off has to
+    // mean both off, or the popup shows an off switch over a page that is still
+    // being toned.
+    await popup.eval(`document.getElementById('picture').click(); true`);
+    await sleep(400);
+    const pictureOff = JSON.parse(
+      (await sw.eval(
+        `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+      )) ?? '{}',
+    );
+    await popup.eval(`document.getElementById('picture').click(); true`);
+    await sleep(400);
+    const pictureOn = JSON.parse(
+      (await sw.eval(
+        `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+      )) ?? '{}',
+    );
+    // Turning one half off downstairs must leave the front switch on, since the
+    // other half is still running.
+    await popup.eval(`document.getElementById('video').click(); true`);
+    await sleep(400);
+    const halfOff = await popup.eval(
+      `(() => ({
+          picture: document.getElementById('picture').checked,
+          video: document.getElementById('video').checked,
+          images: document.getElementById('images').checked,
+       }))()`,
+    );
+    await popup.eval(`document.getElementById('video').click(); true`);
+    await sleep(400);
+    check(
+      'the picture switch drives both halves, and follows them back',
+      pictureOff.video === false &&
+        pictureOff.images === false &&
+        pictureOn.video === true &&
+        pictureOn.images === true &&
+        halfOff.picture === true &&
+        halfOff.video === false &&
+        halfOff.images === true,
+      `off=${pictureOff.video}/${pictureOff.images}, on=${pictureOn.video}/${pictureOn.images}, ` +
+        `video alone off keeps the panel switch ${halfOff.picture}`,
     );
 
     // The clock fields only mean anything while the night restriction is on, so
@@ -1704,18 +1964,22 @@ async function main() {
     await sleep(400);
     check(
       'popup renders and reflects stored settings',
-      popupState.strength === '70' && popupState.master === true,
+      popupState.audioStrength === '70' &&
+        popupState.videoStrength === '70' &&
+        popupState.master === true,
       JSON.stringify(popupState),
     );
+    // The readout is the word, not the number: 70 is "Strong" in
+    // `describeStrength()`, and the digit stays on the slider.
     check(
-      'popup labels the strength value',
-      typeof popupState.label === 'string' && popupState.label.includes('70'),
-      popupState.label,
+      'each panel names its own strength in words',
+      popupState.audioLabel === 'Strong' && popupState.videoLabel === 'Strong',
+      `sound "${popupState.audioLabel}", picture "${popupState.videoLabel}"`,
     );
 
     // The curve thumbnail must actually draw, and must change with strength.
     const curveSignature = `(() => {
-       const canvas = document.getElementById('curve');
+       const canvas = document.getElementById('video-curve');
        const ctx = canvas.getContext('2d');
        const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
        let lit = 0;
@@ -1731,7 +1995,7 @@ async function main() {
     const curveAt70 = JSON.parse(await popup.eval(curveSignature));
     await popup.eval(
       `(() => {
-         const slider = document.getElementById('strength');
+         const slider = document.getElementById('video-strength');
          slider.value = '0';
          slider.dispatchEvent(new Event('input'));
          return true;
@@ -1747,11 +2011,11 @@ async function main() {
 
     // The audio graph is generated from the same mapping the engine uses, so it
     // has to draw and to respond to the slider as well.
-    const audioSignature = curveSignature.replace("'curve'", "'audio-curve'");
+    const audioSignature = curveSignature.replace("'video-curve'", "'audio-curve'");
     const audioAt0 = JSON.parse(await popup.eval(audioSignature));
     await popup.eval(
       `(() => {
-         const slider = document.getElementById('strength');
+         const slider = document.getElementById('audio-strength');
          slider.value = '85';
          slider.dispatchEvent(new Event('input'));
          return true;
@@ -1765,29 +2029,28 @@ async function main() {
         `${audioAt0.centroid.toFixed(1)} vs ${audioAt85.centroid.toFixed(1)}`,
     );
 
-    // Splitting the sliders is a popup-driven settings change; check the UI
-    // swaps over and the write lands.
-    await popup.eval(`document.getElementById('link-toggle').click(); true`);
-    await sleep(400);
-    const splitUi = await popup.eval(
-      `(() => ({
-          splitShown: !document.getElementById('split').hidden,
-          masterShown: !document.getElementById('strength').hidden,
-          pressed: document.getElementById('link-toggle').getAttribute('aria-pressed'),
-       }))()`,
-    );
-    const splitStored = await sw.eval(
-      `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+    // The two sliders above were dragged to 0 and 85 respectively. Each has to
+    // have written its own setting and left the other one alone — that
+    // independence is the whole reason the panels each own a slider.
+    await sleep(500);
+    const strengthsStored = JSON.parse(
+      (await sw.eval(
+        `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+      )) ?? '{}',
     );
     check(
-      'popup can separate the two sliders and persists the choice',
-      splitUi.splitShown === true &&
-        splitUi.masterShown === false &&
-        splitUi.pressed === 'true' &&
-        JSON.parse(splitStored).linked === false,
-      JSON.stringify(splitUi),
+      'each slider persists its own group and leaves the other alone',
+      strengthsStored.videoStrength === 0 && strengthsStored.audioStrength === 85,
+      `audio=${strengthsStored.audioStrength}, video=${strengthsStored.videoStrength}`,
     );
-    await popup.eval(`document.getElementById('link-toggle').click(); true`);
+    check(
+      'and neither of the removed settings comes back',
+      !('strength' in strengthsStored) &&
+        !('linked' in strengthsStored) &&
+        !('pageColor' in strengthsStored),
+      Object.keys(strengthsStored).join(','),
+    );
+    await writeSettings({ strength: 70 });
     await sleep(400);
 
     // The per-site button is the whole point of reporting the hostname. In this
@@ -1836,9 +2099,11 @@ async function main() {
 
     await popup.eval(
       `(() => {
-         const slider = document.getElementById('strength');
-         slider.value = '70';
-         slider.dispatchEvent(new Event('input'));
+         for (const id of ['audio-strength', 'video-strength']) {
+           const slider = document.getElementById(id);
+           slider.value = '70';
+           slider.dispatchEvent(new Event('input'));
+         }
          return true;
        })()`,
     );
@@ -1862,6 +2127,24 @@ async function main() {
         aggregate?.frames >= 2 &&
         aggregate?.stale === false,
       JSON.stringify(aggregate),
+    );
+
+    // The line under the master switch is the only status most openings of the
+    // popup will read, so it has to agree with the aggregate above: both halves
+    // are running here, and it has to say so in one sentence.
+    const summaryUi = await waitFor('popup summarises the tab in one line', async () => {
+      const state = await popup.eval(
+        `(() => ({
+            text: document.getElementById('summary-text').textContent,
+            dot: document.getElementById('summary-dot').dataset.state,
+         }))()`,
+      );
+      return /^Softening the sound and picture$/.test(state.text) ? state : false;
+    });
+    check(
+      'the summary line reports both halves running',
+      summaryUi.dot === 'active',
+      `"${summaryUi.text}" (${summaryUi.dot})`,
     );
 
     /* -------- console hygiene -------- */

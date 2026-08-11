@@ -218,6 +218,17 @@ export class VideoEngine {
     this.onStatusChange();
   }
 
+  /**
+   * Filter functions to carry after the tone curve on this engine's videos.
+   *
+   * The page treatment inverts the root element, and `filter` is one property:
+   * a rule of its own cannot add to this engine's, only replace it. So the
+   * counter-inversion is appended here instead. See `core/page.ts`.
+   */
+  setPageCompensation(css: string): void {
+    this.filter.setExtraFilters(css);
+  }
+
   getStatus(): VideoEngineStatus {
     return {
       mode: this.enabled ? this.mode : 'off',

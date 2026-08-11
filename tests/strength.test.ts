@@ -230,7 +230,7 @@ describe('mapVideoStrength', () => {
   it('produces a visible effect at the default strength', () => {
     // Regression guard: the first release was mapped so gently that the video
     // effect was imperceptible at the default setting.
-    const p = mapVideoStrength(DEFAULT_SETTINGS.strength);
+    const p = mapVideoStrength(DEFAULT_SETTINGS.videoStrength);
     expect(p.shadowGamma).toBeGreaterThan(1.3);
     expect(p.highlightCompression).toBeGreaterThan(0.05);
     expect(p.adapt.flashDim).toBeGreaterThan(0.15);
@@ -441,25 +441,15 @@ describe('audioTransferDb', () => {
 });
 
 describe('mapSettings', () => {
-  it('drives both halves from the master value while linked', () => {
-    const settings = sanitizeSettings({
-      strength: 80,
-      linked: true,
-      audioStrength: 5,
-      videoStrength: 5,
-    });
+  it('drives each half from its own slider', () => {
+    const settings = sanitizeSettings({ audioStrength: 80, videoStrength: 20 });
     const params = mapSettings(settings);
     expect(params.audio).toEqual(mapAudioStrength(80, false));
-    expect(params.video).toEqual(mapVideoStrength(80));
+    expect(params.video).toEqual(mapVideoStrength(20));
   });
 
-  it('honours the per-channel values once unlinked', () => {
-    const settings = sanitizeSettings({
-      strength: 80,
-      linked: false,
-      audioStrength: 90,
-      videoStrength: 0,
-    });
+  it('lets one half bypass while the other keeps working', () => {
+    const settings = sanitizeSettings({ audioStrength: 90, videoStrength: 0 });
     const params = mapSettings(settings);
     expect(params.audio).toEqual(mapAudioStrength(90, false));
     // Video at 0 must be a genuine bypass even with audio at full strength.

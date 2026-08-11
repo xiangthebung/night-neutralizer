@@ -14,116 +14,94 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
+    <!--
+      The front of this popup answers three questions and no more: is it on,
+      how much sound, how much picture. Everything else — the graphs, the
+      per-path switches, the per-tab report, the shortcut, reset — is real and
+      still here, one disclosure down, because the version that showed all of
+      it at once read as a settings dump rather than a control.
+
+      The rule for what stays on the front: a control belongs here if someone
+      would reach for it while watching something. Night EQ, the music
+      exemption and the video/image split are decided once and then left alone,
+      so they are not front-of-popup controls no matter how useful they are.
+    -->
     <main class="app" id="app">
       <header class="header">
-        <div class="brand">
-          <span class="moon" aria-hidden="true"></span>
-          <div class="brand-text">
-            <h1>Night Neutralizer</h1>
-          </div>
-        </div>
+        <span class="moon" aria-hidden="true"></span>
+        <h1>Night Neutralizer</h1>
         <label class="switch" for="master">
-          <span class="switch-label">Enabled</span>
+          <span class="sr-only">Enabled</span>
           <input type="checkbox" id="master" />
           <span class="track" aria-hidden="true"><span class="thumb"></span></span>
         </label>
       </header>
 
       <!--
-        There was a tagline here ("quiet dialogue up, loud effects down"). The two
-        graph captions below state the same thing in numbers, and the popup's
-        600 px height budget is now spent on the night window instead.
+        One sentence for the whole tab, directly under the switch that governs
+        it. The two per-path lines it summarises are still rendered, in "More
+        options" — they explain *why* when the answer is surprising, and the
+        answer is usually not surprising.
       -->
-
-      <p class="shortcut" id="shortcut" hidden>
-        <kbd id="shortcut-keys"></kbd> toggles it anywhere.
-        <button type="button" id="shortcut-edit" class="link-button">Change</button>
+      <p class="summary" id="summary" role="status" aria-live="polite">
+        <span class="dot" id="summary-dot" data-state="idle" aria-hidden="true"></span>
+        <span id="summary-text">Checking this tab…</span>
       </p>
 
-      <section class="card" id="controls" aria-labelledby="strength-title">
-        <div class="row" id="linked-row">
-          <label class="title" id="strength-title" for="strength">Neutralization strength</label>
-          <output class="value" id="strength-value" for="strength">45</output>
+      <!--
+        A panel is a thing being treated: its switch, how much, and a line of
+        plain English saying what "how much" means. The strength readout is the
+        word rather than the number — "Balanced" is the part anyone acts on,
+        and 0..100 is still on the slider for anyone who wants it.
+      -->
+      <section class="card" id="sound-card" aria-labelledby="sound-title">
+        <div class="card-head">
+          <h2 class="title" id="sound-title">Sound</h2>
+          <output class="value" id="audio-strength-value" for="audio-strength">Balanced</output>
+          <label class="switch" for="audio">
+            <span class="sr-only">Process sound</span>
+            <input type="checkbox" id="audio" />
+            <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+          </label>
         </div>
+        <p class="card-desc">Quiet dialogue up, loud scenes down</p>
         <input
           type="range"
-          id="strength"
+          id="audio-strength"
           min="0"
           max="100"
           step="1"
           value="45"
-          aria-describedby="strength-help"
+          aria-label="Sound strength"
         />
+      </section>
 
-        <div id="split" hidden>
-          <div class="row">
-            <label class="title" for="audio-strength">Audio strength</label>
-            <output class="value" id="audio-strength-value" for="audio-strength">45</output>
-          </div>
-          <input
-            type="range"
-            id="audio-strength"
-            min="0"
-            max="100"
-            step="1"
-            value="45"
-            aria-describedby="strength-help"
-          />
-          <div class="row">
-            <label class="title" for="video-strength">Video strength</label>
-            <output class="value" id="video-strength-value" for="video-strength">45</output>
-          </div>
-          <input
-            type="range"
-            id="video-strength"
-            min="0"
-            max="100"
-            step="1"
-            value="45"
-            aria-describedby="strength-help"
-          />
+      <!--
+        Moving pictures and stills are separate switches downstairs, because
+        they are genuinely different bargains. Up here they are one switch:
+        someone turning "Picture" off means the picture, not one half of the
+        pipeline that produces it.
+      -->
+      <section class="card" id="picture-card" aria-labelledby="picture-title">
+        <div class="card-head">
+          <h2 class="title" id="picture-title">Picture</h2>
+          <output class="value" id="video-strength-value" for="video-strength">Balanced</output>
+          <label class="switch" for="picture">
+            <span class="sr-only">Process the picture</span>
+            <input type="checkbox" id="picture" />
+            <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+          </label>
         </div>
-
-        <button type="button" id="link-toggle" class="link-button wide" aria-pressed="false">
-          Set audio and video separately
-        </button>
-
-        <div class="previews">
-          <figure class="preview">
-            <canvas
-              id="curve"
-              class="curve"
-              width="272"
-              height="80"
-              role="img"
-              aria-labelledby="curve-caption"
-              title="Video: original brightness left to right, resulting brightness bottom to top. The dotted diagonal is no change. The shaded band is how far the curve moves as scenes get darker or brighter."
-            ></canvas>
-            <figcaption class="reading" id="curve-caption">
-              <span id="video-reading-1">Dark scenes brighter</span>
-              <span id="video-reading-2">Whites softer</span>
-            </figcaption>
-          </figure>
-          <figure class="preview">
-            <canvas
-              id="audio-curve"
-              class="curve"
-              width="272"
-              height="80"
-              role="img"
-              aria-labelledby="audio-curve-caption"
-              title="Audio: incoming level left to right, resulting level bottom to top, in decibels. The dotted diagonal is no change. Settled levels only, so sudden transients sit a little higher."
-            ></canvas>
-            <figcaption class="reading" id="audio-curve-caption">
-              <span id="audio-reading-1">Quiet parts louder</span>
-              <span id="audio-reading-2">Loud-to-quiet gap smaller</span>
-            </figcaption>
-          </figure>
-        </div>
-        <p class="sr-only" id="strength-help">
-          Two graphs show the effect at this setting: the video tone curve, and
-          the audio level curve. Each caption states the change in numbers.
-        </p>
+        <p class="card-desc">Shadows lifted, glare pulled back</p>
+        <input
+          type="range"
+          id="video-strength"
+          min="0"
+          max="100"
+          step="1"
+          value="45"
+          aria-label="Picture strength"
+        />
       </section>
 
       <section class="card" aria-labelledby="when-title">
@@ -146,77 +124,133 @@
         </div>
       </section>
 
-      <section class="card" aria-labelledby="channels-title">
-        <h2 class="title sr-only" id="channels-title">What to process</h2>
+      <!--
+        Everything that is set once and then forgotten. Its open/closed state is
+        remembered in `localStorage` rather than in settings: it is a property
+        of this browser's popup, not something worth syncing to another machine.
+      -->
+      <details class="more" id="more">
+        <summary class="more-summary">
+          <span class="chev" aria-hidden="true"></span>
+          More options
+        </summary>
 
-        <label class="toggle" for="audio">
-          <span class="toggle-name">Audio<span class="toggle-hint"
-              >compressor + limiter</span
-            ></span>
-          <input type="checkbox" id="audio" />
-          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-        </label>
+        <div class="more-body">
+          <section class="sub" aria-labelledby="more-sound">
+            <h3 class="sub-title" id="more-sound">Sound</h3>
 
-        <!--
-          The two halves of the picture path share one row. They are genuinely
-          separate switches — a video is measured and corrected for what it
-          contains, a still gets one fixed curve — but the popup has a 600 px
-          height budget and a fifth full-width switch does not fit inside it.
-        -->
-        <div class="toggle-row">
-          <label class="toggle" for="video">
-            <span class="toggle-name">Video</span>
-            <input type="checkbox" id="video" />
-            <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-          </label>
+            <figure class="preview">
+              <canvas
+                id="audio-curve"
+                class="curve"
+                width="240"
+                height="70"
+                role="img"
+                aria-labelledby="audio-curve-caption"
+                title="Incoming level left to right, resulting level bottom to top, in decibels. The dotted diagonal is no change. Settled levels only, so sudden transients sit a little higher."
+              ></canvas>
+              <figcaption class="reading" id="audio-curve-caption">
+                <span id="audio-reading-1">Quiet parts louder</span>
+                <span id="audio-reading-2">Loud-to-quiet gap smaller</span>
+              </figcaption>
+            </figure>
 
-          <label class="toggle" for="images">
-            <span class="toggle-name">Images</span>
-            <input type="checkbox" id="images" />
-            <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-          </label>
+            <label class="toggle" for="night-eq">
+              <span class="toggle-name">Night EQ<span class="toggle-hint"
+                  >less bass through walls</span
+                ></span>
+              <input type="checkbox" id="night-eq" />
+              <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+            </label>
+
+            <label class="toggle" for="skip-music">
+              <span class="toggle-name">Leave music alone<span class="toggle-hint"
+                  >range is the point</span
+                ></span>
+              <input type="checkbox" id="skip-music" />
+              <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+            </label>
+          </section>
+
+          <section class="sub" aria-labelledby="more-picture">
+            <h3 class="sub-title" id="more-picture">Picture</h3>
+
+            <figure class="preview">
+              <canvas
+                id="video-curve"
+                class="curve"
+                width="240"
+                height="70"
+                role="img"
+                aria-labelledby="video-curve-caption"
+                title="Original brightness left to right, resulting brightness bottom to top. The dotted diagonal is no change. The shaded band is how far the curve moves as scenes get darker or brighter."
+              ></canvas>
+              <figcaption class="reading" id="video-curve-caption">
+                <span id="video-reading-1">Dark scenes brighter</span>
+                <span id="video-reading-2">Whites softer</span>
+              </figcaption>
+            </figure>
+
+            <div class="toggle-row">
+              <label class="toggle" for="video">
+                <span class="toggle-name">Video</span>
+                <input type="checkbox" id="video" />
+                <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+              </label>
+
+              <label class="toggle" for="images">
+                <span class="toggle-name">Images</span>
+                <input type="checkbox" id="images" />
+                <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+              </label>
+            </div>
+
+            <!--
+              The page around the media rather than the media itself, which is
+              why it is the one control here that the slider does not touch: a
+              page is dark or it is not. Off by default, and the note below is
+              only rendered while it is on.
+            -->
+            <label class="toggle" for="dark-mode">
+              <span class="toggle-name">Dark mode<span class="toggle-hint"
+                  >the page behind it</span
+                ></span>
+              <input type="checkbox" id="dark-mode" />
+              <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+            </label>
+            <p class="row-note" id="page-note" hidden></p>
+          </section>
+
+          <section class="sub" aria-labelledby="more-tab">
+            <h3 class="sub-title" id="more-tab">This tab</h3>
+            <div id="status">
+              <p class="status-line">
+                <span class="dot" id="audio-dot" data-state="idle" aria-hidden="true"></span>
+                <span id="audio-status">Checking audio…</span>
+              </p>
+              <!-- One line for the whole picture path: moving pictures and still ones. -->
+              <p class="status-line">
+                <span class="dot" id="picture-dot" data-state="idle" aria-hidden="true"></span>
+                <span id="picture-status">Checking the picture…</span>
+              </p>
+              <p class="notes" id="notes" hidden></p>
+            </div>
+            <button type="button" id="site-toggle" class="site-button" hidden aria-pressed="false">
+              <span id="site-toggle-text">Skip this site</span>
+            </button>
+          </section>
+
+          <section class="sub">
+            <p class="shortcut" id="shortcut" hidden>
+              <kbd id="shortcut-keys"></kbd> toggles it anywhere.
+              <button type="button" id="shortcut-edit" class="link-button">Change</button>
+            </p>
+            <button type="button" id="reset" class="link-button">Reset to defaults</button>
+          </section>
         </div>
-
-        <label class="toggle" for="night-eq">
-          <span class="toggle-name">Night EQ<span class="toggle-hint"
-              >less bass through walls</span
-            ></span>
-          <input type="checkbox" id="night-eq" />
-          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-        </label>
-
-        <label class="toggle" for="skip-music">
-          <span class="toggle-name">Leave music alone<span class="toggle-hint"
-              >range is the point</span
-            ></span>
-          <input type="checkbox" id="skip-music" />
-          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
-        </label>
-      </section>
-
-      <section class="card status" aria-labelledby="status-title">
-        <div class="status-head">
-          <h2 class="title" id="status-title">Right now on this tab</h2>
-          <button type="button" id="site-toggle" class="site-button" hidden aria-pressed="false">
-            <span id="site-toggle-text">Skip this site</span>
-          </button>
-        </div>
-        <div id="status" role="status" aria-live="polite">
-          <p class="status-line">
-            <span class="dot" id="audio-dot" data-state="idle" aria-hidden="true"></span>
-            <span id="audio-status">Checking audio…</span>
-          </p>
-          <!-- One line for the whole picture path: moving pictures and still ones. -->
-          <p class="status-line">
-            <span class="dot" id="picture-dot" data-state="idle" aria-hidden="true"></span>
-            <span id="picture-status">Checking the picture…</span>
-          </p>
-          <p class="notes" id="notes" hidden></p>
-        </div>
-      </section>
+      </details>
 
       <footer class="footer">
-        <button type="button" id="reset" class="link-button">Reset to defaults</button>
         <span class="privacy">Nothing leaves your browser.</span>
         <span class="toast" id="reset-note" role="status" aria-live="polite" hidden></span>
       </footer>

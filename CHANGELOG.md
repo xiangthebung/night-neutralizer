@@ -8,6 +8,73 @@ follow [semver](https://semver.org/).
 
 ### Added
 
+- **Dark mode: the page around the media.** A new switch in the picture panel,
+  off by default and gated by night like everything else. The rest of this
+  extension treats *content* and takes care not to change what the author
+  intended; this deliberately changes how a site looks, which is why it is not
+  implied by the master switch and does not arrive switched on with an update.
+
+  It asks the site first and measures whether it answered. The polite
+  request is `color-scheme: dark`, which is worth making because it is free and
+  fixes precisely what inversion handles worst — form controls, scrollbars, and
+  the canvas behind a page that paints no background of its own.
+
+  What it does *not* do is flip `prefers-color-scheme`. That query reports the
+  user's preference, not the property, and an extension with no `debugger`
+  permission cannot change it — so the large majority of sites, which put their
+  dark theme behind `@media (prefers-color-scheme: dark)`, will not answer at
+  all. This was measured in Chrome rather than assumed, and it is why the
+  fallback is the path most pages actually take: `invert(1) hue-rotate(180deg)`
+  on the root, undone on media.
+
+  That pair is an involution rather than an approximation. Writing `I(x) = 1 − x`
+  and `M` for the hue-rotation matrix, `f(x) = M(1 − x) = 1 − Mx` because `M`
+  fixes white, so `f(f(x)) = x` exactly — a photograph inside an inverted page
+  comes back out exactly as it went in.
+
+  **Neither end of the inverted range goes all the way.** A straight inversion
+  sends a white page to `#000000` and its black text to `#ffffff`, which is more
+  contrast than anyone wants at 1 a.m. The output is squeezed into
+  `#121212 … #dbdbdb` instead, by a `contrast()`/`brightness()` pair composing to
+  `out = in·(ceiling − floor) + floor`. It costs much less legibility than it
+  sounds like it should, because the squeeze is *relational* — text and
+  background move together — so black-on-white goes from 21:1 to 13.5:1 (WCAG
+  AAA wants 7:1) and `#666`-on-white from 5.74:1 to 5.48:1. Both are pinned by
+  unit tests; the endpoints are measured off real screenshots in the smoke run.
+
+  Media rides the same squeeze and is deliberately not compensated for it, which
+  is a property of filters rather than a decision: an element filter cannot emit
+  values outside 0..1, so nothing inside the filtered root can land outside
+  `[floor, ceiling]`. Compensating would demand that impossible expansion and
+  clamp, flattening everything above 85% of a photograph's range into one value.
+  Riding the squeeze is a linear scale that loses no detail at all.
+
+  **Fullscreen needed two rules of its own, and finding out why was the reason
+  this took a second pass.** A fullscreen element is in the top layer, and the
+  top layer is *not* painted through its ancestors' filters — but it **is**
+  painted through its own. Verified in Chrome. So the first cut of this feature
+  would have rendered a fullscreen video as a photographic negative: the
+  counter-inversion stayed on the element with no root inversion left to cancel
+  it. Media in the top layer now drops the compensation while keeping its tone
+  curve, and a non-media element in the top layer takes over the root filter's
+  job so fullscreening a slideshow does not flash the page back to white.
+
+  Three decisions worth recording. The applied scheme is `light`, not `dark`,
+  once a page is being inverted: the UA widgets are about to be flipped, so they
+  have to be drawn light in order to end up dark, and asking for a dark scheme
+  there is the one thing that makes a form control glow on a black page. The
+  counter-inversion is appended to the image and video engines' own rules rather
+  than written as a rule of its own, because `filter` is a single property and
+  two rules cannot merge — only one can win, so the zero-specificity
+  `:where(img,video,iframe,embed,object)` fallback covers exactly the media
+  those engines have not claimed. And `iframe` is in that list because every
+  frame runs its own copy of the engine: a nested document inverts itself if it
+  needs to, so inverting it again from the parent would cancel it back to white.
+
+  Cost to the popup: one row plus a readout line that is only rendered while the
+  switch is on. `scripts/popup-shot.mjs` measures that state by default instead
+  of flattering the layout.
+
 - **Still images are tone mapped too.** A bright photograph at 1 a.m. is exactly
   as unpleasant as a bright frame of video, and until now the extension dimmed
   one and not the other. `<img>` now goes through the same compositor path — a
@@ -60,6 +127,119 @@ follow [semver](https://semver.org/).
   a filter to without restyling the page's own boxes.
 
 ### Fixed
+
+- **Dark mode's white flash is shorter.** The page engine could only measure a
+  site's background once `<body>` existed, and until now the first attempt to
+  find that out was `DOMContentLoaded` — which waits for the *whole* document
+  to finish parsing, not just the part that decides the canvas colour. On a
+  page with a lot of markup below the fold, that gap was long enough to see: the
+  polite `color-scheme: dark` request went in at `document_start`, then nothing
+  happened until parsing caught up. A `MutationObserver` now fires the
+  measurement the instant `<body>` is inserted, which on most pages lands at or
+  before first paint, because a render-blocking stylesheet in `<head>` — the
+  thing that actually sets the background — has already run by then. Pages
+  whose colour genuinely arrives later (an async stylesheet, a theme switcher)
+  still fall through to the `DOMContentLoaded`/upkeep-loop correction, same as
+  before.
+
+- **Dark-mode content is no longer brightened.** A screencast of a dark-mode
+  editor is half flat dark background, so its encoded mean reads as a night
+  scene — but the light arrives through the text, and the frame is already
+  emitting 0.33 against a comfort budget of 0.36. The shadow lift engaged
+  anyway, at 0.62 of full strength, and bought nothing for it: there is no
+  detail in a flat fill to open up, so the entire effect was the background
+  going from 30/255 to 46/255 at the default strength and 75/255 at the top of
+  the slider, and the frame leaving 19% brighter than it arrived. A night
+  extension that makes the screen brighter has inverted its one job.
+
+  The cause was the veto band, which sat *above* the budget rather than below
+  it: the lift ran at full strength on a frame already delivering its budget and
+  did not release until the frame was a quarter over. It is now measured against
+  `COMFORT_LIGHT` — the same budget the exposure servo steers to, and the mirror
+  of the `brightNeed` gate — so the lift is allowed in proportion to the room
+  the frame has left, and a frame with none gets none. The two hand-tuned
+  constants it replaces are gone.
+
+  Turning up contrast instead was the obvious alternative and is the wrong
+  trade: measured on the same frame, `contrast(1.3)` restores the black level
+  but pushes peak white from 0.773 to 0.854 — above the *source's* 0.804, and
+  through both the stated white point and the new ceiling — while emitted light
+  barely moves. It swaps the wash for glare. The wash was the lift; not lifting
+  is the contrast.
+
+  Scenes that were not the bug are untouched **to the bit**: the tone curve for
+  a night scene, a very dark night scene, the dashcam clip, a normal scene and a
+  daylight scene is identical entry for entry, at every strength. The
+  dark-mode background now moves by at most 7 codes across the whole slider.
+  Two scenes do change beyond the reported one, both correctly — a night scene
+  with a street lamp in it and a dim interior, each already at or over budget,
+  now keep their blacks instead of being partly opened.
+
+- **A cut out of a dark scene no longer flashes you before the curve responds.**
+  Every correction in the tone curve was reactive — it looked at a frame and
+  answered it — and reaction is the wrong shape for a cut, because the bright
+  frame is on screen before anything has measured it. Detection costs a frame at
+  best, `frameStride` frames once the sampler has backed off on 4K content, and a
+  cut that only partly registers as one earns only partial snap credit, so there
+  was no worst case at all. Measured at the default strength: a settled night
+  scene sat at a white point of 0.93 while the daylight scene it cut to settled
+  at 0.71, and for however long detection took, that gap was the flash.
+
+  The fix is a **white-point ceiling**: a standing cap on the curve's output,
+  armed *before* the cut rather than in response to it. Nothing reacts, so
+  nothing is late. Peak output across a cut is now monotonically non-increasing
+  regardless of whether the cut was detected, how much snap credit it earned, or
+  how many frames the sampler skipped — pinned by a test that walks the stride-8
+  worst case frame by frame.
+
+  Three things make it not the washed-out regression this project already fixed
+  once:
+
+  - **It is set to the bright-scene white point**, not to a tuned constant. That
+    is the brightest output the extension already holds sustained content to, so
+    a cut is simply not allowed to exceed what a blazing daylight frame is given
+    once the servo has finished with it. There is nothing left to tune, and it
+    scales with the slider for free: 18% less emitted light on an unmeasured
+    white frame at strength 25, 43% at 45, 60% at 60, 79% at 100.
+  - **It is gated on how dark-adapted the viewer is**, not on the current frame.
+    A normally exposed scene arms it not at all and gets a bit-for-bit unchanged
+    curve. A dark scene arms it fully, which costs that scene almost nothing —
+    a night frame has very few pixels above the knee, and the ones it has are
+    lamps and speculars, which is exactly the light worth holding down.
+  - **It spends the whole correction above the knee.** Lowering exposure or
+    raising the shoulder instead would have reached into the mid-tones. The knee
+    is re-solved against the lower white point, so everything below it is
+    untouched and the shoulder stays C1-continuous.
+
+  The arming level is the one piece of state deliberately *exempt* from the cut
+  snap. A cut out of a night scene is precisely the moment the incoming frame
+  stops reading as dark, so snapping would release the ceiling on the very frame
+  it exists to cover. It eases in over 2.5 s and out over 5 s instead, which
+  makes the protection a property of where the viewer has been rather than of
+  what just arrived. The slow release costs nothing on genuinely bright content
+  (the exposure servo puts the white point below the ceiling within about a
+  second, so the cap stops binding long before it lifts) and was measured not to
+  pump on the case that could have: leaving a dark scene for a normal one moves
+  the curve by at most 9.5 8-bit levels per frame, against 9.4 with the ceiling
+  pinned off — 0.1 levels attributable to the ceiling, all of it in the first
+  half second where the exposure and lift easing already dominates.
+
+  Two knock-on changes, both narrowing what was asserted to what is actually
+  guaranteed:
+
+  - `adaptBounds()`' two ends now meet at the top, since the dark bound carries
+    the ceiling armed and the ceiling *is* the bright bound's white. The popup's
+    shaded band is a band in the shadows and a single point at the white end,
+    which is the guarantee drawn rather than described. The caption is unchanged:
+    it already quoted the bright bound.
+  - The slope-allocation bound is now asserted in its scale-invariant form. A
+    histogram concentrated enough to pin every interval against a bound — which
+    an armed ceiling makes more likely, by flattening the top of the range —
+    leaves the bounded allocation unable to sum to the curve's stated range, and
+    `redistribute()` closes the gap by scaling all of them uniformly. That is the
+    documented trade (the endpoint wins over the bounds) and it moves the
+    individual ratios by a common factor while leaving the spread between them
+    exactly where the bounds put it, so the spread is what the test now checks.
 
 - **The tone curve now reaches the compositor on every presented frame.** Two
   independent frame-droppers meant the LUT often updated at a fraction of the
@@ -126,6 +306,76 @@ follow [semver](https://semver.org/).
 
 ### Changed
 
+- **The popup opens on three controls instead of fifteen.** Panels were the
+  right grouping and the wrong altitude: every switch, both graphs, both
+  captions and the per-tab report were on screen at once the moment you clicked
+  the icon, and a control you touch twice a year was competing for attention
+  with the slider you came in for.
+
+  What the popup opens on now is what you would reach for while watching
+  something: the master switch, a switch and a slider for **Sound**, the same
+  for **Picture**, the night window, and one sentence saying what is happening
+  on this tab — *Softening the sound and picture*, *Waiting for 09:00 PM*,
+  *Paused*. Everything else moved behind **More options**, grouped by the panel
+  it belongs to, and nothing was removed: the graphs and their decibel captions,
+  Night EQ, the music exemption, the Video/Images split, dark mode, the two
+  detailed status lines, the per-site skip, the shortcut hint and reset are all
+  one click down. The disclosure remembers whether you left it open, in
+  `localStorage` rather than in settings — it describes this popup on this
+  machine, not how anything is processed.
+
+  **Picture gained a front switch standing for both halves of its path.** Off
+  means both off; on means both on, rather than whichever pair happened to be
+  set last, because one switch producing two different results from the same
+  visible state is worse than the granularity it would buy. Turning one half off
+  downstairs leaves the front switch on, since the other half is still running.
+
+  **The strength readout is the word, not the number.** "45 · balanced" asked
+  the reader to translate twice — digit to word, word to consequence — and only
+  the second translation was ever useful. The digit is still on the slider and
+  in what a screen reader announces.
+
+  The height budget stopped being tight as a result: the state the popup opens
+  at is 472 px against Chrome's 600 px cap, from 591 px, and the per-site button
+  and dark mode's readout no longer move that number at all. Expanded it runs to
+  966 px and scrolls, which is the consequence of a deliberate click rather than
+  the state you are handed. `popup-shot.mjs` now reports both, and `MORE=1`
+  screenshots the expanded state.
+
+- **The popup is reorganised into panels, one per thing being treated.** It had
+  grown into a strength card followed by one flat list of six switches, in which
+  **Images** and **Dark mode** sat two and three rows below **Audio** and read
+  as though they belonged to it. They never did.
+
+  There are now two panels, **Sound** and **Picture**, and everything that
+  belongs to one lives inside it: its strength slider, the graph of what that
+  slider does, and its own switches. Sound holds Night EQ and the music
+  exemption — both sound-only, which is why compressing a music video was never
+  what "leave music alone" meant. Picture holds Video, Images and Dark mode.
+  Sound's panel heading carries the group's master switch, because with it off
+  nothing else in that panel can do anything; Picture's does not, because moving
+  pictures and stills are genuinely separate switches and there is no single
+  thing for one there to mean.
+
+  `Settings` is grouped the same way, in the same order, for the same reason: a
+  setting whose neighbours in the type are not its neighbours on screen is one
+  that gets filed in the wrong place twice.
+
+- **One strength slider per panel; the link toggle is gone.** The old model was
+  one slider with a "set audio and video separately" button that split it into
+  two. With each panel owning a slider that distinction has nothing left to
+  express, so `strength` and `linked` are gone from storage: what you were
+  running at carries over to both sliders, and an install that had already
+  separated them keeps both values.
+
+  Two sliders always visible is also what let the graphs move beside their
+  captions rather than above them, which is where the height came from. The
+  worst-case popup is 591 px against Chrome's 600 px cap, from 639 px — the old
+  split state was 39 px over and had been scrolling quietly.
+
+  Dragging both sliders inside the write debounce used to persist only the
+  second one; patches now accumulate.
+
 - **The tone curve now snaps at a scene change instead of easing into it.** The
   measurement was never the slow part — frames are analysed on
   `requestVideoFrameCallback`, one frame after presentation — but the adaptation
@@ -172,6 +422,15 @@ follow [semver](https://semver.org/).
   Measured on the animated smoke clip, the largest single-step white-point drop
   over one scene cycle goes 0.2022 → 0.2863, and the controlled white flash is
   unchanged at 0.714 → 0.533.
+
+### Removed
+
+- **Page colour.** It pulled the whole document towards grey on a `saturate()`
+  riding the picture slider. Dark mode already does what it was for, more
+  thoroughly, and a desaturated-but-still-white page is neither the site's
+  design nor a comfort win worth a permanent switch in a popup with a 600 px
+  height budget. Stored settings carrying `pageColor` drop it on the next write.
+  `pageDark` is now `darkMode`, migrated in place.
 
 ## [1.0.0] - 2026-08-09
 

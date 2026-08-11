@@ -80,21 +80,24 @@ if (swTarget) {
   await sw.send('Runtime.evaluate', {
     expression: `chrome.storage.sync.set({ settings: ${JSON.stringify({
       enabled: true,
-      strength,
-      // SPLIT=1 renders the separated audio/video sliders, NIGHT_EQ=1 the EQ row.
-      linked: process.env.SPLIT !== '1',
-      audioStrength: Number(process.env.AUDIO_STRENGTH ?? strength),
-      videoStrength: Number(process.env.VIDEO_STRENGTH ?? strength),
-      audio: true,
-      video: true,
-      nightEq: process.env.NIGHT_EQ === '1',
       disabledSites: [],
+      audio: true,
+      // AUDIO_STRENGTH / VIDEO_STRENGTH override one panel's slider on its own.
+      audioStrength: Number(process.env.AUDIO_STRENGTH ?? strength),
+      nightEq: process.env.NIGHT_EQ === '1',
+      skipMusic: true,
+      video: true,
+      images: true,
+      videoStrength: Number(process.env.VIDEO_STRENGTH ?? strength),
+      // On by default for the same reason the night window is: dark mode's
+      // readout line is part of the worst-case height, and measuring it hidden
+      // would flatter the layout. DARK_MODE=0 turns it off.
+      darkMode: process.env.DARK_MODE !== '0',
       // Shown by default: the night window row is part of the worst-case height,
       // so measuring it hidden would flatter the layout. NIGHT_ONLY=0 hides it.
       nightOnly: process.env.NIGHT_ONLY !== '0',
       nightStart: 21 * 60,
       nightEnd: 7 * 60,
-      skipMusic: true,
     })} })`,
     awaitPromise: true,
   });
@@ -112,19 +115,32 @@ await new Promise((r) => setTimeout(r, 3000));
 
 /*
  * Chrome caps a popup at 600 CSS px and scrolls beyond that, so the height is
- * part of the design budget. The worst case is a page where the per-site button
- * is showing, which this profile has no way to produce, so it is measured by
+ * part of the design budget — but only the height the popup *opens* at is, now
+ * that the seldom-touched controls live behind a disclosure. That state is
+ * what the cap is checked against; the expanded height is reported for
+ * information, since scrolling it is the consequence of a deliberate click.
+ *
+ * The worst case of the closed state is a page where the per-site button is
+ * showing, which this profile has no way to produce, so it is measured by
  * revealing the button directly.
+ *
+ * MORE=1 screenshots the expanded state instead of the closed one.
  */
+const expand = process.env.MORE === '1';
 const size = await page.send('Runtime.evaluate', {
   expression: `(() => {
      const app = document.querySelector('.app');
+     const more = document.getElementById('more');
+     more.open = false;
      const h = document.body.scrollHeight;
      const button = document.getElementById('site-toggle');
      const wasHidden = button.hidden;
      button.hidden = false;
      const withSite = document.body.scrollHeight;
+     more.open = true;
+     const expanded = document.body.scrollHeight;
      button.hidden = wasHidden;
+     more.open = ${expand};
      const keys = document.getElementById('shortcut-keys');
      return JSON.stringify({
        w: app.offsetWidth,
@@ -135,18 +151,22 @@ const size = await page.send('Runtime.evaluate', {
        docWidth: document.documentElement.getBoundingClientRect().width,
        h,
        withSite,
+       expanded,
+       shot: document.body.scrollHeight,
        shortcutShown: !document.getElementById('shortcut').hidden,
        shortcutKeys: JSON.stringify(keys.textContent),
      });
    })()`,
   returnByValue: true,
 });
-const { w, h, docWidth, withSite, shortcutShown, shortcutKeys } = JSON.parse(size.result.value);
+const { w, h, docWidth, withSite, expanded, shot: shotHeight, shortcutShown, shortcutKeys } =
+  JSON.parse(size.result.value);
 const verdict = withSite > 600 ? `OVER the 600 cap by ${withSite - 600}` : 'fits the 600 cap';
 console.log(
   `strength ${strength}: popup is ${w} x ${h} CSS px ` +
     `(${withSite} with the per-site button) — ${verdict}`,
 );
+console.log(`with "More options" open: ${expanded} CSS px (scrolls past 600 by design)`);
 console.log(
   docWidth > w
     ? `WIDTH REGRESSION: the document is ${docWidth} px against a ${w} px column, ` +
@@ -158,7 +178,7 @@ console.log(`shortcut hint: ${shortcutShown ? `shown, keys=${shortcutKeys}` : 'h
 const shot = await page.send('Page.captureScreenshot', {
   format: 'png',
   captureBeyondViewport: true,
-  clip: { x: 0, y: 0, width: w, height: h, scale: 1 },
+  clip: { x: 0, y: 0, width: w, height: shotHeight, scale: 1 },
 });
 await writeFile(outFile, Buffer.from(shot.data, 'base64'));
 console.log(`wrote ${outFile}`);
