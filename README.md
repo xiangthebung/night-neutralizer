@@ -206,6 +206,13 @@ The disclosure remembers whether you left it open.
   subdomains, and it matches both the page you are on and the origin of an
   embedded player, so skipping `youtube.com` also silences YouTube embeds
   elsewhere.
+- **The skipped-site count, and *Clear***, directly under it, once the list is
+  not empty. The list is capped at **200 hostnames**, because it rides
+  `chrome.storage.sync` and that area has a quota. At the cap the extension
+  refuses the 201st and says so, rather than making room by deleting one of your
+  entries — which is what it used to do, silently, and by alphabetical order, so
+  the entry it dropped was as often as not the one you had just added. `Clear`
+  empties the list without touching any other setting.
 - **Reset to defaults**, and the keyboard shortcut the extension is currently
   bound to, are at the bottom of the same panel.
 
@@ -1281,7 +1288,7 @@ Chrome will then only inject the content script on those sites.
 
 ## Testing
 
-Unit tests (`npm test`, 438 tests) cover the strength → parameter mapping
+Unit tests (`npm test`, 493 tests) cover the strength → parameter mapping
 (including the night EQ and the transfer model the popup plots), tone-curve maths
 and adaptation behaviour (including sampling-rate-independent flash and
 scene-change detection), the frame-skip control law, the safety clipper, media
@@ -1296,6 +1303,29 @@ enough not to wrap), the SVG filter's DOM handling under jsdom (including the
 `<base href>` workaround and fullscreen re-parenting), and the status reporter's
 throttling.
 
+Four of those suites exist because the code they cover cannot be seen from a
+browser. `video-engine-static.test.ts` drives the path taken when frames cannot
+be read at all — every protected stream, and every cross-origin video served
+without CORS — and asserts the three things that go wrong quietly there: it
+does not throw, it does not keep asking, and it still applies a curve.
+
+`light-sensor.test.ts` covers the sensor's *absence*, which is what a stock
+Chrome install has, and follows it through to a gate decision, so the clock
+fallback is verified across the module boundary rather than on either side of
+it.
+
+`docs.test.ts` checks this file, the privacy policy and the store listing
+against the source. A setting added without a policy line, a renamed file left
+in the layout diagram, a retuned constant still quoted in the listing, and the
+two counts above are all failing commands rather than things to remember.
+
+`service-worker.test.ts` runs the MV3 worker against a fake `chrome`. Its two
+interesting cases are the ones a browser will not reproduce on demand: six
+frames of one page reporting into the same read-modify-write at once, and a
+restart between two of them — which is why `chrome.storage.session` is the
+source of truth rather than the module's own cache, and why the session area's
+access level is widened from the top level of the script rather than at install.
+
 Dark mode has two suites of its own. The pure one pins the CSS colour parser,
 canvas luminance against real sites' background colours, the softened inversion's
 two endpoints and the contrast ratios they produce, and the property that matters
@@ -1305,7 +1335,7 @@ inverted, that a light one is, that the verdict does not oscillate when
 re-measured under the other colour scheme, that it follows a page which changes
 its background later, and that switching off leaves no root filter behind.
 
-The end-to-end suite (`npm run smoke`, 91 checks) drives real headless Chrome
+The end-to-end suite (`npm run smoke`, 98 checks) drives real headless Chrome
 over the DevTools protocol: it installs the built extension, plays generated
 media, and asserts that the filter is applied, that the curve *changes across a
 scene change*, that **screenshotted pixels** show lifted shadows and compressed

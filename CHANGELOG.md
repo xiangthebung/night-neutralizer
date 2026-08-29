@@ -8,6 +8,15 @@ follow [semver](https://semver.org/).
 
 ### Added
 
+- **Four new test suites, for the four places nothing was looking.** The
+  static-mode video path (DRM and tainted canvases — a large share of real
+  usage, and previously covered only by the pure frame-skip law), the light
+  sensor's *absence* followed through to a gate decision, the MV3 service
+  worker under a simulated restart and a six-frame write race, and the
+  documentation against the source. 438 tests to 493. Two of them found
+  something on the first run, which is the only evidence a test suite offers
+  that it was worth writing.
+
 - **Dark mode: the page around the media.** A new switch in the picture panel,
   off by default and gated by night like everything else. The rest of this
   extension treats *content* and takes care not to change what the author
@@ -126,7 +135,53 @@ follow [semver](https://semver.org/).
   `background-image`, SVG artwork and canvas drawings have no element to attach
   a filter to without restyling the page's own boxes.
 
+- **A visible skipped-site count, and a way to empty the list.** *More options
+  → This tab* now shows how many hostnames are on the skip list, and a `Clear`
+  next to it that empties the list without touching any other setting. It
+  exists because that list is capped and synced: before this, a user who
+  reached the cap had no way to see that they had, and no way to make room
+  short of *Reset to defaults*, which discards everything. The privacy policy
+  already promised the list could be cleared from the popup; now that is true.
+
 ### Fixed
+
+- **The smoke run's step-size check no longer measures the test machine.**
+  “No single curve update is large enough to read as a step” compared each
+  LUT write against a fixed threshold of three 8-bit levels. When the machine
+  running it stalls, the browser presents no frames for a while, the adaptation
+  integrates over the whole gap, and the next write lands as one larger change
+  — with no intermediate frame on screen for anyone to have seen it against.
+  Observed failing about one run in four at 6.66 levels against a usual 1.4.
+  Each jump is now divided by the number of frame intervals its write actually
+  spanned, which is the property the check was always about. On a machine
+  keeping up the divisor is 1, so the healthy figure is unchanged: 1.40 levels
+  normalised against 1.40 raw, measured over three consecutive runs.
+
+- **The 201st skipped site is refused, and said so, instead of silently
+  deleting one of yours.** `toggleSite()` capped the list with
+  `next.sort().slice(0, 200)`, which made room by dropping whichever hostname
+  sorted last. That is two different silent failures in one line. If the site
+  you had just clicked sorted last it was itself the entry discarded, so
+  *Skip this site* did nothing at all while the popup toasted “Left alone on
+  …”; and if it did not, an unrelated host you excluded months ago was
+  quietly switched back on. The list is now full or it is not: at the cap the
+  add is refused, the popup says the list is full and points at `Clear`, and
+  nothing the user put there is ever removed on their behalf. Adding a parent
+  domain still succeeds on a full list, because absorbing its subdomains frees
+  room rather than needing it.
+
+  The old test asserted only that the list was still 200 long afterwards, which
+  both behaviours satisfy. That is the lesson worth keeping: a cap test that
+  counts entries cannot see *which* entry went.
+
+- **An unreadable video no longer re-registers its own frame callback.** When
+  `measure()` decided mid-callback that an element could never be analysed
+  — DRM, a tainted canvas, a long run of black frames — it detached the
+  frame callback and then the callback re-registered itself on the way out,
+  scheduling a frame the engine had just decided it did not want and leaving a
+  handle nothing could cancel. Self-correcting on the following frame, so the
+  cost was one wasted callback rather than a loop, but it was the engine
+  disagreeing with itself. Found by the new static-mode suite.
 
 - **Dark mode's white flash is shorter.** The page engine could only measure a
   site's background once `<body>` existed, and until now the first attempt to
@@ -305,6 +360,38 @@ follow [semver](https://semver.org/).
   govern and none was covered by.
 
 ### Changed
+
+- **The privacy policy now matches the code, line by line.** Two settings had
+  shipped without a line in it — `images` and `darkMode` — and the
+  description of the per-tab session record listed four fields where the code
+  writes a dozen, including a copy of the settings themselves. Also added: that
+  still images are never read at all, that dark mode reads two computed
+  background colours and nothing else, and where in the popup the exclusion
+  list is actually cleared. The store listing picked up the same corrections,
+  plus a dark-mode entry it had never had, a description length that was off by
+  one, and a slider bullet still describing the single linked slider that was
+  removed when the panels were split.
+
+- **Documentation rot is a failing command.** `tests/docs.test.ts` checks the
+  three published documents against the source: every key in `Settings` has a
+  disclosure line and nothing is disclosed that is no longer stored, the
+  exclusion cap is quoted correctly, the “no network calls” claim is
+  verified by searching `src/` for the call syntax it says is absent, the store
+  summary is byte-identical to the manifest description with its stated length
+  correct, the popup captions the listing quotes are recomputed from the real
+  curves, every path in the README's layout diagram exists, and both test
+  counts are derived rather than maintained. Written first as a check that
+  passed vacuously: splitting the layout diagram on a bare newline left a
+  carriage return at the end of every line, which the entry pattern refused,
+  so the loop examined nothing and the diagram could have said anything at
+  all. It now also asserts how much it looked at.
+
+- **`npm run build` no longer dirties the working tree.** The icons are drawn
+  at build time and encoded as PNG, and `zlib.deflateSync` output depends on
+  the zlib Node was linked against rather than on the input — so a rebuild on
+  a different machine produced eight files that differed byte for byte and not
+  by one pixel. `scripts/sync-root.mjs` now compares the decompressed image
+  data and keeps the existing file when the picture is unchanged.
 
 - **The popup opens on three controls instead of fifteen.** Panels were the
   right grouping and the wrong altitude: every switch, both graphs, both

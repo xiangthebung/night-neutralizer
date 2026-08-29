@@ -13,7 +13,7 @@ npm run smoke    # end-to-end in headless Chrome
 
 ## 1. Automated: unit tests
 
-`npm test` — 438 tests, no browser required.
+`npm test` — 493 tests, no browser required.
 
 | file | covers |
 | --- | --- |
@@ -36,6 +36,10 @@ npm run smoke    # end-to-end in headless Chrome
 | `tests/ambient.test.ts` | lux → dark/bright with a **deliberate gap between the thresholds** so a reading at the boundary cannot flip the extension once a second, the midpoint decision with no prior verdict, nonsense values refused rather than guessed, a reading old enough to be from another day discarded so the clock takes over, **the publishing throttle** (verdict changes go out at once, a steady room publishes nothing, a real change waits out the gap), and the shared store: round-trip, a failed write reported rather than thrown (the normal case before the service worker widens session access), other storage areas ignored, unsubscribe not leaking |
 | `tests/music.test.ts` | the music heuristics: listed services and their subdomains, **any `music.*` host** so regional variants need no entry, general video hosts left alone (`music.youtube.com` matches and `youtube.com` does not), lookalike hosts not fooling it, an embedded player on an unrelated page still counting, **every list entry already in normalised form** or it could never match, element classification waiting for metadata (every `<video>` is 0x0 until then), audio-only playback anywhere counting as music, and film not being assumed to be music while it loads |
 | `tests/gate.test.ts` | the single processing decision and its **order of precedence**: master switch, then the exclusion list, then the sensor, then the clock. The sensor overriding the clock in both directions, the clock used when there is no reading, the sensor ignored once the night restriction is off, custom and collapsed windows, and the re-check delay (no timer when nothing is time-dependent, capped so a DST change cannot go unnoticed for an hour, never short enough to spin) |
+| `tests/video-engine-static.test.ts` | (jsdom) the branch taken when frames cannot be read at all, which is every protected stream and every cross-origin video served without CORS: **DRM detected from `mediaKeys` before the canvas is touched**, a `SecurityError` on the first read-back ending the attempt rather than repeating it, **no read-back at all for the next five minutes once an element is known unreadable**, **the frame callback detached instead of re-registering itself sixty times a second**, a fade to black tolerated while a long run of black frames is not, the fixed curve actually installed (not the identity) and reported as `static` rather than `adaptive`, and nothing left behind when switched off |
+| `tests/light-sensor.test.ts` | the sensor wrapper and, mostly, its absence — the path essentially every install takes: **an unexposed constructor settling as `unavailable` without throwing and without being retried**, an insecure context treated the same way, a permission-policy refusal and a failed `start()` both landing in `blocked` with a note, `NotReadableError` and `NotAllowedError` named apart, junk illuminance ignored rather than published, listeners released on `stop()`, and **the join to `core/gate.ts` followed end to end** so that no sensor means the clock decides, a real reading overrides it, and a reading old enough to be from yesterday hands the decision back |
+| `tests/service-worker.test.ts` | the MV3 worker against a fake `chrome`: one record per frame keyed by tab, **six frames reporting at once with a slow storage area and none of them lost** (the read-modify-write race the queue exists for), a tab's records dropped when it closes, the map bounded at sixty tabs with the stalest evicted first, **a restart finding what the previous instance left** because `storage.session` is the source of truth rather than the module's cache, **session access re-opened on every wake** rather than only at install, the badge saying `off`/`site`/`day` and painted from the top frame only, stale per-tab overrides cleared when the master switch changes, and the keyboard command flipping exactly one setting |
+| `tests/docs.test.ts` | the documentation, checked against the source: **every key in `Settings` disclosed in the privacy policy, and nothing disclosed that is no longer stored**, the exclusion cap quoted correctly, the no-network claim verified by searching `src/` for the call syntax it says is absent, the store listing's summary identical to the manifest description and its stated length correct, name and version agreeing across the manifest, the package and all three documents, **the popup captions the listing quotes recomputed from the real curves**, the shipped defaults and content-script matches quoted correctly, every path in the README's layout diagram existing, the unit and smoke counts derived rather than maintained, every `npm run` script the README names existing, and no placeholder left in any of them |
 
 ## 2. Automated: end-to-end in real Chrome
 
@@ -45,7 +49,7 @@ npm run smoke
 
 Installs the built extension into a throwaway Chrome profile over the DevTools
 protocol (`Extensions.loadUnpacked`; Chrome 137+ ignores `--load-extension`),
-serves the test bench, and asserts 91 checks.
+serves the test bench, and asserts 98 checks.
 
 Note that the suite writes `nightOnly: false` and `skipMusic: false` into its
 baseline settings. The shipped defaults only process between 21:00 and 07:00 and

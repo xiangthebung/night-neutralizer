@@ -4,7 +4,7 @@
 
 Night Neutralizer
 
-Version 1.0.0. Name, version and the short description below are taken verbatim from `src/manifest.json`; the short description is 118 characters, inside the store's 132 limit.
+Version 1.0.0. Name, version and the short description below are taken verbatim from `src/manifest.json`; the short description is 119 characters, inside the store's 132 limit. `tests/docs.test.ts` holds all four of those to the manifest, so this paragraph cannot go stale quietly.
 
 ## Summary
 
@@ -16,7 +16,7 @@ Accessibility. Well-being is the reasonable alternative if the dashboard's list 
 
 ## Single purpose
 
-Night Neutralizer reduces the dynamic range of the video, still images and audio in a tab — lifting shadow detail, rolling highlights off, and bringing quiet dialogue up towards loud effects — so that using a screen in a dark room does not require a bright screen or a loud volume.
+Night Neutralizer reduces the dynamic range of the video, still images and audio in a tab — lifting shadow detail, rolling highlights off, and bringing quiet dialogue up towards loud effects, and optionally darkening the page around them — so that using a screen in a dark room does not require a bright screen or a loud volume.
 
 ## Detailed description
 
@@ -28,14 +28,15 @@ Night Neutralizer includes:
 - Scene adaptation: the current frame is measured, at 48×27 pixels, once per presented frame — in linear light, so what is measured is the light actually coming off the screen rather than how dark the frame happens to look. Dark scenes get opened up; anything above a comfortable light level is dimmed by exactly the amount that brings it back down, with its blacks left at black and its contrast redistributed towards the levels the scene actually occupies rather than shaved off the top; a scene already below that level passes through untouched; and a sudden rise in brightness dips exposure and pulls the white point down before decaying back.
 - Still images: the same compositor path over `<img>`, with one fixed curve — exposure down a little and highlights rolled off, blacks left exactly where they are. Pictures are usually served from another origin, which means their pixels cannot be read at all, so the curve is deliberately built so that never knowing what a picture contains can only ever leave it slightly darker rather than washed out. A toggle of its own, on by default.
 - Audio dynamic-range compression per media element: compressor, make-up gain, limiter and an instantaneous safety clipper, arranged so that peaks stay below full scale even when a full-scale burst lands straight after a quiet passage. The site's own volume slider, mute button and keyboard shortcuts keep working, because they act before the graph does.
-- One strength slider, 0 to 100, default 45, or one slider each for audio and video. 0 is a real bypass, not a small effect.
+- One strength slider each for sound and picture, 0 to 100, default 45. They are separate numbers because "compress the soundtrack hard but barely touch the picture" is an ordinary thing to want. 0 is a real bypass, not a small effect.
+- Dark mode for the page behind the media, off by default. It asks the site for its own dark presentation first and only inverts the pages that stay light, which is most of them; the popup says which of the two happened. Media is counter-inverted exactly, so a photograph on an inverted page is not a negative.
 - Two live graphs of the actual curves, with a caption under each stating the change in numbers — at the default, "dark scenes 2.9× brighter / whites 28% softer" and "quiet parts +9 dB / loud-to-quiet gap −9 dB". They are drawn from the same functions the engines run, so the panel cannot describe an effect the extension is not applying.
 - Only at night, on by default. If the browser exposes an ambient light sensor the room decides; otherwise a clock window does, 21:00 to 07:00 by default, and the popup says which of the two is in charge.
 - Night EQ, off by default: takes the low end down and lifts dialogue presence, because bass is what travels through walls.
 - Leave music alone, on by default. Dynamic range is the point of a record and a nuisance in a film, so audio-only playback and known music services keep their dynamics. Video is still tone mapped.
-- Skip this site, one click, by hostname — subdomains and embedded players from that host included.
+- Skip this site, one click, by hostname — subdomains and embedded players from that host included. The list is capped at 200 hostnames and shown with a count and a Clear button, so a full list is something you are told about rather than something that silently ignores the click.
 - `Alt+Shift+N` toggles the whole extension without opening the popup, remappable at `chrome://extensions/shortcuts`. The toolbar badge reads `off`, `site` or `day` so that "deliberately doing nothing" and "broken" do not look the same.
-- A status block that says what is actually happening in the tab: how many players are being compressed, whether video is running scene analysis or a fixed night curve, and how many pictures the image curve is on.
+- A status block that says what is actually happening in the tab: how many players are being compressed, whether video is running scene analysis or a fixed night curve, how many pictures the image curve is on, and — when dark mode is on — whether the page answered the polite request or is being inverted.
 
 Free. There is no paid tier, no account, no trial and no payment processor anywhere in the source.
 
@@ -66,7 +67,7 @@ Every declared permission is used, so there is nothing here to remove before sub
 - Location — no. The ambient light reading is an illuminance value in lux, is used to answer one yes-or-no question, is never stored on disk and never leaves the browser.
 - Web history — no. No URL, path, query string, page title or visit is recorded.
 - User activity — no. No clicks, keystrokes or mouse movement are recorded.
-- Website content — no. To choose a tone curve the extension draws the frame the page is already showing into a 48×27 offscreen canvas, reduces it to four numbers, and discards it. The pixels are not stored, not transmitted and not exposed to the page.
+- Website content — no. Two things are read from a page and neither is kept. To choose a tone curve the extension draws the frame the page is already showing into a 48×27 offscreen canvas, reduces it to four numbers, and discards it; the pixels are not stored, not transmitted and not exposed to the page. With dark mode switched on it also reads the computed background colour of the root element and of `<body>` through `getComputedStyle`, turns the pair into one luminance figure, and keeps only the verdict `scheme` or `invert`. No text, markup, form field, cookie or URL is read anywhere in the source.
 
 Certify all three: the data is not sold or transferred to third parties outside approved use cases, is not used or transferred for any purpose unrelated to the item's single purpose, and is not used or transferred to determine creditworthiness or for lending purposes. Link the published `PRIVACY_POLICY.md` as the privacy policy URL.
 
@@ -93,7 +94,8 @@ Everything below is something the code cannot support. Keeping it out of the lis
 - **Do not claim it prevents bright flashes.** The flash guard is reactive: it measures a frame that has already been shown, so the dim lands on the next one, roughly 16 ms later at 60 fps. It shortens a flash; it does not remove one. Frame lookahead is not available to an extension.
 - **Do not claim Picture-in-Picture, casting or AirPlay output is processed.** Those render on a separate surface and get nothing.
 - **Do not claim it works on every player.** A site that decodes into a `<canvas>` or a WebGL surface gets no video processing at all; the CSS rule targets `<video>` elements. The audio half still works.
-- **Do not claim per-video or per-URL control.** Skipping is by hostname only, and the extension deliberately never sees the path.
+- **Do not claim per-video or per-URL control.** Skipping is by hostname only, and the extension deliberately never sees the path. The list is capped at 200 hostnames; past that the popup says so rather than making room by deleting one of the user's entries.
+- **Do not describe dark mode as a reading-mode or a theme.** It asks for `color-scheme: dark` and, failing that, inverts and squeezes the page. It cannot flip `prefers-color-scheme`, which is where most sites keep their real dark theme, so most pages take the inversion path — and inversion is a filter over whatever the site drew, not a redesign of it. It is off by default for that reason.
 - **Do not claim it uses your room's light level.** Chrome keeps `AmbientLightSensor` behind `chrome://flags/#enable-generic-sensor-extra-classes` and most desktops have no sensor, so in practice the clock decides. Phrase it as "the room decides if your browser exposes a light sensor, otherwise the clock does" — which is what the popup itself says.
 - **Do not claim all audio is compressed.** Cross-origin audio without CORS headers cannot be processed; the extension detects it and restores native playback. It runs at most four Web Audio graphs per frame — its own cap, chosen to stay well inside Chromium's limit on concurrent audio contexts — and reports extra players as skipped. Muted autoplay gets audio processing only after the first click or key press, per browser autoplay policy.
 - **Do not claim music detection is accurate.** It is a heuristic over the host and the element. A podcast or audiobook in an `<audio>` element is treated as music and left uncompressed; a music service not on the list that ships a real video track is compressed like a film. The toggle exists because of that.
