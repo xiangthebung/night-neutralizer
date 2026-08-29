@@ -1,9 +1,9 @@
 # Night Neutralizer
 
 A Chrome extension for watching and listening in a dark room. It reduces the
-**dynamic range** of both video and audio so you can keep the screen dim and the
-volume low without losing dark scenes or quiet dialogue — and without being
-ambushed by a bright cut or an explosion.
+**dynamic range** of the video, images and audio in a tab, so you can keep the
+screen dim and the volume low without losing dark scenes or quiet dialogue —
+and without being ambushed by a bright cut or an explosion.
 
 - **Audio:** Web Audio compressor + make-up gain + limiter per media element,
   with an optional night EQ that takes the bass down and dialogue up.
