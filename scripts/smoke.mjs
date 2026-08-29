@@ -1098,22 +1098,26 @@ async function main() {
       const read = () => (func.getAttribute('tableValues') ?? '').split(' ').map(Number);
       let last = func.getAttribute('tableValues');
       let lastValues = read();
+      let lastAt = performance.now();
       const observer = new MutationObserver(() => {
         const value = func.getAttribute('tableValues');
         if (value === last) return;
         last = value;
-        // How big a jump each write asks the screen to make: the observable
-        // behind "I can see it stepping".
+        const now = performance.now();
+        // How big a jump each write asks the screen to make, and how long it had
+        // to make it in: the observable behind "I can see it stepping", plus the
+        // interval it has to be judged against.
         const values = read();
         if (values.length === lastValues.length) {
           let worst = 0;
           for (let i = 0; i < values.length; i++) {
             worst = Math.max(worst, Math.abs(values[i] - lastValues[i]));
           }
-          steps.push(worst);
+          steps.push({ jump: worst, gap: now - lastAt });
         }
         lastValues = values;
-        lut.push(performance.now());
+        lastAt = now;
+        lut.push(now);
       });
       observer.observe(func, { attributes: true, attributeFilter: ['tableValues'] });
       const frames = [];
@@ -1126,19 +1130,37 @@ async function main() {
       video.cancelVideoFrameCallback(handle);
       if (lut.length < 2 || frames.length < 2) return null;
       const gaps = lut.slice(1).map((t, i) => t - lut[i]).sort((a, b) => a - b);
+      const frameGap = (frames.at(-1) - frames[0]) / (frames.length - 1);
       // A cut is meant to arrive whole and is masked by the cut itself, so it
       // is not a step anyone can see. Split the two populations rather than
       // taking a percentile over both: measured here they differ by 60x
       // (~1 8-bit level of smooth motion against ~85 at a cut), so where the
       // line goes between them makes no difference to the verdict.
-      const smooth = steps.filter((s) => s <= 8 / 255).sort((a, b) => a - b);
+      //
+      // Each remaining jump is then divided by how many frame intervals its
+      // write actually spanned, because a step is only visible against the
+      // frame before it. When the machine running this stalls, the browser
+      // presents no frames for a while, the adaptation integrates over the
+      // whole gap, and the next write lands as one larger change — with no
+      // intermediate frame on screen for anyone to see it against. Left raw,
+      // this check measured the load on the test machine as much as the
+      // extension, and failed about one run in four here. On a machine keeping
+      // up, gap and frameGap are equal and the divisor is 1, so this does not
+      // loosen the healthy case at all.
+      const spanned = (s) => Math.max(1, s.gap / frameGap);
+      const smooth = steps
+        .filter((s) => s.jump <= 8 / 255)
+        .map((s) => s.jump / spanned(s))
+        .sort((a, b) => a - b);
+      const rawMax = Math.max(0, ...steps.filter((s) => s.jump <= 8 / 255).map((s) => s.jump));
       return {
         fps: frames.length / ((frames.at(-1) - frames[0]) / 1000),
         hz: lut.length / ((lut.at(-1) - lut[0]) / 1000),
         medianGap: gaps[Math.floor(gaps.length / 2)],
-        frameGap: (frames.at(-1) - frames[0]) / (frames.length - 1),
+        frameGap,
         smoothMedian: smooth[Math.floor(smooth.length / 2)] ?? 0,
         smoothMax: smooth.at(-1) ?? 0,
+        rawMax,
         cuts: steps.length - smooth.length,
       };
     })()`);
@@ -1161,8 +1183,8 @@ async function main() {
       'no single curve update is large enough to read as a step',
       cadence !== null && cadence.smoothMax < 3 / 255,
       cadence
-        ? `largest smooth update ${cadence.smoothMax.toFixed(5)} ` +
-          `(${(cadence.smoothMax * 255).toFixed(2)} of one 8-bit level), ` +
+        ? `largest smooth update ${(cadence.smoothMax * 255).toFixed(2)} of one 8-bit level ` +
+          `per presented frame (${(cadence.rawMax * 255).toFixed(2)} raw), ` +
           `median ${(cadence.smoothMedian * 255).toFixed(2)}, ${cadence.cuts} cut snaps excluded`
         : 'could not measure',
     );
@@ -2096,6 +2118,87 @@ async function main() {
     // Put it back, then let the engines re-engage before the status query below.
     await popup.eval(`document.getElementById('site-toggle').click(); true`);
     await sleep(600);
+
+    /* ------------------------- the 201st skipped site ---------------------- */
+    // The cap is 200 and it rides chrome.storage.sync, so it is reachable in
+    // principle and unreachable in practice — which is exactly the kind of
+    // boundary that ships broken. It did: the list was trimmed by sorting and
+    // slicing, so the click either dropped the host it had just added or
+    // switched an unrelated one back on, and the popup said "Left alone on ..."
+    // either way. Both halves are checked here, through the real popup.
+    const capFilled = Array.from(
+      { length: 200 },
+      (_, i) => `s${String(i).padStart(3, '0')}.example`,
+    );
+    await writeSettings({ strength: 70, disabledSites: capFilled });
+    await waitFor('popup sees the full skip list', async () => {
+      const shown = await popup.eval(
+        `document.getElementById('skip-list').hidden ? '' :
+           document.getElementById('skip-list-count').textContent`,
+      );
+      return shown && shown.includes('200') ? shown : false;
+    });
+    const fullRow = await popup.eval(
+      `document.getElementById('skip-list-count').textContent`,
+    );
+    check(
+      'the popup says how many sites are skipped, and that the list is full',
+      /200 sites/.test(fullRow ?? '') && /full/i.test(fullRow ?? ''),
+      `"${fullRow}"`,
+    );
+
+    await popup.eval(`document.getElementById('site-toggle').click(); true`);
+    await sleep(400);
+    const refusal = await popup.eval(
+      `(() => {
+         const note = document.getElementById('reset-note');
+         return JSON.stringify({ hidden: note.hidden, text: note.textContent });
+       })()`,
+    );
+    const afterRefusal = JSON.parse(
+      (await sw.eval(
+        `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+      )) ?? '{}',
+    );
+    const refusalToast = JSON.parse(refusal ?? '{}');
+    check(
+      'the 201st site is refused, and the popup says so instead of claiming it worked',
+      refusalToast.hidden === false &&
+        /full/i.test(refusalToast.text ?? '') &&
+        !afterRefusal.disabledSites?.includes('localhost'),
+      `"${refusalToast.text}", localhost excluded=${Boolean(
+        afterRefusal.disabledSites?.includes('localhost'),
+      )}`,
+    );
+    check(
+      'and no site the user already skipped was quietly dropped to make room',
+      afterRefusal.disabledSites?.length === 200 &&
+        capFilled.every((host) => afterRefusal.disabledSites.includes(host)),
+      `${afterRefusal.disabledSites?.length ?? 0} entries, all original`,
+    );
+
+    await popup.eval(`document.getElementById('skip-list-clear').click(); true`);
+    const cleared = await waitFor('the skip list is cleared from the popup', async () => {
+      const stored = JSON.parse(
+        (await sw.eval(
+          `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+        )) ?? '{}',
+      );
+      return stored.disabledSites?.length === 0 ? stored : false;
+    });
+    const rowHidden = await popup.eval(`document.getElementById('skip-list').hidden`);
+    check(
+      'Clear empties the skip list without touching the other settings',
+      Boolean(cleared) &&
+        rowHidden === true &&
+        cleared.videoStrength === 70 &&
+        cleared.enabled === true,
+      `${cleared?.disabledSites?.length ?? '?'} entries left, row hidden=${rowHidden}`,
+    );
+
+    // Back to a clean baseline for everything below.
+    await writeSettings({ strength: 70 });
+    await sleep(400);
 
     await popup.eval(
       `(() => {
