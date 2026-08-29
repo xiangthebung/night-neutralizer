@@ -355,6 +355,13 @@ export class VideoEngine {
       // integration is a few `exp` calls.
       if (++this.frameCounter % this.frameStride === 0) this.measure(candidate, record);
       else this.advance();
+      // `measure` can decide mid-callback that this element will never be
+      // readable — DRM, a tainted canvas, a long run of black frames — and
+      // detach. Re-registering unconditionally then schedules a frame the
+      // engine has just decided it does not want, and leaves a handle behind
+      // that nothing can cancel, because `detachFrameCallback` has already let
+      // go of the element. The guard costs a comparison per frame.
+      if (this.frameVideo !== candidate) return;
       this.frameHandle = candidate.requestVideoFrameCallback?.(step) ?? 0;
     };
 
