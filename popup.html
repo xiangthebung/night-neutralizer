@@ -238,6 +238,15 @@
             <button type="button" id="site-toggle" class="site-button" hidden aria-pressed="false">
               <span id="site-toggle-text">Skip this site</span>
             </button>
+            <!--
+              The skip list is capped and synced, so it has to be visible and
+              clearable from here: without this the only way out of a full list
+              was "Reset to defaults", which throws away every other setting too.
+            -->
+            <p class="skip-list" id="skip-list" hidden>
+              <span id="skip-list-count"></span>
+              <button type="button" id="skip-list-clear" class="link-button">Clear</button>
+            </p>
           </section>
 
           <section class="sub">

@@ -665,6 +665,21 @@ kbd {
   outline-offset: 2px;
 }
 
+/*
+ * The count of skipped sites and the way to empty it. Baseline alignment so the
+ * "Clear" link sits on the same line as the sentence rather than under it; the
+ * whole row is hidden while the list is empty, which is the usual case.
+ */
+.skip-list {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  column-gap: 6px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 /* ---------- footer ---------- */
 
 .footer {
