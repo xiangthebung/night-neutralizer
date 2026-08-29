@@ -106,10 +106,34 @@ export function isSiteDisabled(
 }
 
 /**
+ * Is the exclusion list full, so that the next unrelated host cannot be added?
+ *
+ * Exported because the popup has to be able to say so. `toggleSite` refuses
+ * quietly by design — a function that returns a list cannot report a reason —
+ * and a refusal nobody is told about is the failure this replaced.
+ */
+export function isSiteListFull(disabledSites: readonly string[] | undefined): boolean {
+  return sanitizeDisabledSites(disabledSites).length >= MAX_DISABLED_SITES;
+}
+
+/**
  * Add or remove a site, returning a new sorted list. Adding a parent domain
  * drops the subdomains it now covers, so the list cannot accumulate redundant
  * entries; removing a site also removes any listed parent that was excluding
  * it, otherwise "turn back on" would appear to do nothing.
+ *
+ * At the cap the add is **refused**, and the list comes back unchanged. It used
+ * to be `next.sort().slice(0, MAX_DISABLED_SITES)`, which made room by deleting
+ * whichever hostname sorted last. That is two silent failures in one line: if
+ * the new key sorted last it was itself the entry dropped, so "skip this site"
+ * did nothing while the popup said it had worked; and if it did not, an
+ * unrelated site the user excluded months ago was silently switched back on.
+ * Refusing keeps the user's own data intact and is a state the popup can
+ * explain — see `isSiteListFull`.
+ *
+ * Note the cap is checked against `next`, after the subdomain filter, so adding
+ * a parent domain that absorbs several listed subdomains still succeeds on a
+ * full list: it makes room rather than needing it.
  */
 export function toggleSite(
   disabledSites: readonly string[] | undefined,
@@ -123,8 +147,9 @@ export function toggleSite(
   if (disabled) {
     if (current.some((entry) => hostCovers(entry, key))) return current;
     const next = current.filter((entry) => !hostCovers(key, entry));
+    if (next.length >= MAX_DISABLED_SITES) return current;
     next.push(key);
-    return next.sort().slice(0, MAX_DISABLED_SITES);
+    return next.sort();
   }
 
   return current.filter((entry) => !hostCovers(entry, key));

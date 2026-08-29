@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   isSiteDisabled,
+  isSiteListFull,
   normalizeSite,
   primarySite,
   sanitizeDisabledSites,
@@ -157,6 +158,69 @@ describe('toggleSite', () => {
     const many = Array.from({ length: MAX_DISABLED_SITES }, (_, i) => `s${i}.test`);
     const result = toggleSite(many, 'zzz-last.test', true);
     expect(result.length).toBe(MAX_DISABLED_SITES);
+  });
+
+  /**
+   * The 201st site.
+   *
+   * This used to be `next.sort().slice(0, MAX_DISABLED_SITES)`, and the test
+   * above — which only counted the entries — passed the whole time. Two
+   * different silent failures hid behind that count, so both are pinned here:
+   * an added host that sorts last was itself the entry dropped, and one that
+   * sorts early evicted an unrelated site the user had excluded earlier.
+   */
+  describe('at the cap', () => {
+    const full = (): string[] =>
+      Array.from({ length: MAX_DISABLED_SITES }, (_, i) => `s${String(i).padStart(3, '0')}.test`);
+
+    it('reports itself as full', () => {
+      expect(isSiteListFull(full())).toBe(true);
+      expect(isSiteListFull(full().slice(0, -1))).toBe(false);
+      expect(isSiteListFull([])).toBe(false);
+      expect(isSiteListFull(undefined)).toBe(false);
+    });
+
+    it('either adds the site or changes nothing, whatever it sorts as', () => {
+      // Both halves matter, and the sort position is what decides which one the
+      // old `slice` broke. `zzz-last.test` sorted after every existing entry, so
+      // the slice discarded precisely the host the user had just clicked;
+      // anything sorting earlier evicted an unrelated site instead. A third
+      // outcome — not added *and* an entry gone — is what this rules out.
+      const before = full();
+      for (const key of ['aaa-first.test', 'm-middle.test', 'zzz-last.test']) {
+        const after = toggleSite(before, key, true);
+        if (isSiteDisabled(after, [key])) {
+          // A successful add may only remove entries the new key now covers.
+          for (const entry of before) expect(after).toContain(entry);
+        } else {
+          expect(after).toEqual(before);
+        }
+      }
+    });
+
+    it('still accepts a parent domain, because that one frees room', () => {
+      // Adding `example.com` absorbs the three subdomains below it, so the list
+      // gets shorter rather than longer and the cap is not in the way.
+      const before = [
+        ...full().slice(0, MAX_DISABLED_SITES - 3),
+        'a.example.com',
+        'b.example.com',
+        'c.example.com',
+      ].sort();
+      expect(before.length).toBe(MAX_DISABLED_SITES);
+      const result = toggleSite(before, 'example.com', true);
+      expect(result).toContain('example.com');
+      expect(result).not.toContain('a.example.com');
+      expect(result.length).toBe(MAX_DISABLED_SITES - 2);
+    });
+
+    it('still removes, so a full list is never a trap', () => {
+      const result = toggleSite(full(), 's000.test', false);
+      expect(result.length).toBe(MAX_DISABLED_SITES - 1);
+      expect(isSiteListFull(result)).toBe(false);
+      // ...and once there is room the next add goes through.
+      expect(toggleSite(result, 'zzz-last.test', true)).toContain('zzz-last.test');
+    });
   });
 });
 

@@ -18,12 +18,12 @@ import {
 } from '../core/strength';
 import { describeAudioEffect, describeVideoEffect } from '../core/readings';
 import { describePageEffect } from '../core/page';
-import { isSiteDisabled, toggleSite } from '../core/site';
+import { isSiteDisabled, isSiteListFull, toggleSite } from '../core/site';
 import { describeLux } from '../core/ambient';
 import { describeClock, formatClock, parseClock } from '../core/schedule';
 import { adaptBounds, buildToneCurve } from '../core/tone-curve';
 import { MSG, type StatusQueryResponse } from '../core/messages';
-import type { Settings, TabStatus } from '../core/types';
+import { MAX_DISABLED_SITES, type Settings, type TabStatus } from '../core/types';
 
 const STRENGTH_WRITE_DEBOUNCE_MS = 180;
 const STATUS_POLL_MS = 1500;
@@ -70,6 +70,9 @@ const el = {
   notes: document.getElementById('notes') as HTMLElement,
   siteToggle: document.getElementById('site-toggle') as HTMLButtonElement,
   siteToggleText: document.getElementById('site-toggle-text') as HTMLElement,
+  skipList: document.getElementById('skip-list') as HTMLElement,
+  skipListCount: document.getElementById('skip-list-count') as HTMLElement,
+  skipListClear: document.getElementById('skip-list-clear') as HTMLButtonElement,
   reset: document.getElementById('reset') as HTMLButtonElement,
   resetNote: document.getElementById('reset-note') as HTMLElement,
   shortcut: document.getElementById('shortcut') as HTMLElement,
@@ -536,9 +539,26 @@ el.siteToggle.addEventListener('click', () => {
   if (!site) return;
   const currentlyDisabled = isSiteDisabled(settings.disabledSites, [site]);
   const disabledSites = toggleSite(settings.disabledSites, site, !currentlyDisabled);
+  // `toggleSite` refuses to add past the cap rather than deleting one of the
+  // user's existing entries to make room, so the click can legitimately change
+  // nothing. Saying so is the whole point of the refusal: the previous
+  // behaviour toasted "Left alone on ..." over a list that did not contain the
+  // site. The row below offers the way out.
+  if (!currentlyDisabled && !isSiteDisabled(disabledSites, [site])) {
+    toast(`Skip list is full at ${MAX_DISABLED_SITES} sites. Clear it below first.`);
+    return;
+  }
   persist({ disabledSites });
   renderSiteToggle();
   toast(currentlyDisabled ? `Back on for ${site}.` : `Left alone on ${site}.`);
+});
+
+el.skipListClear.addEventListener('click', () => {
+  const count = settings.disabledSites.length;
+  if (count === 0) return;
+  persist({ disabledSites: [] });
+  renderSiteToggle();
+  toast(count === 1 ? 'Skip list cleared.' : `Skip list cleared (${count} sites).`);
 });
 
 el.shortcutEdit.addEventListener('click', () => {
@@ -549,6 +569,7 @@ el.shortcutEdit.addEventListener('click', () => {
 });
 
 function renderSiteToggle(): void {
+  renderSkipList();
   const site = lastStatus?.site ?? '';
   if (!site) {
     el.siteToggle.hidden = true;
@@ -566,6 +587,25 @@ function renderSiteToggle(): void {
     ? `Night Neutralizer is leaving ${site} alone. Click to process it again.`
     : `Leave ${site} completely alone.`;
   el.siteToggleText.textContent = `Skip ${site}`;
+}
+
+/**
+ * How many sites are on the skip list, and the way to empty it.
+ *
+ * Hidden while the list is empty, which is the state almost every install stays
+ * in. It exists because the list is capped and synced: a user who reaches the
+ * cap otherwise has no way to see that they have, and no way to make room short
+ * of "Reset to defaults", which discards every other setting as well.
+ */
+function renderSkipList(): void {
+  const count = settings.disabledSites.length;
+  el.skipList.hidden = count === 0;
+  if (count === 0) return;
+  const sites = count === 1 ? '1 site' : `${count} sites`;
+  el.skipListCount.textContent = isSiteListFull(settings.disabledSites)
+    ? `Skipping ${sites} — the list is full.`
+    : `Skipping ${sites}.`;
+  el.skipListClear.setAttribute('aria-label', `Clear the skip list of ${sites}`);
 }
 
 /** Show the real shortcut, whatever the user has remapped it to. */
