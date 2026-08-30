@@ -55,6 +55,21 @@ Some things cannot be done, and are not attempted. Protected (DRM) video cannot 
 
 Every declared permission is used, so there is nothing here to remove before submitting. For completeness, the following are deliberately **not** declared and not needed: `tabs`, `activeTab`, `scripting`, `webRequest`, `unlimitedStorage`, `cookies`, `notifications`, `alarms`, and any `host_permissions`. Three `chrome.tabs` calls do appear in the source — `tabs.query` for tab ids in the popup and the service worker, `tabs.sendMessage` to the extension's own content script, and `tabs.create` to open `chrome://extensions/shortcuts` — and all three work without the `tabs` permission, which withholds urls and titles. Each is wrapped so that a refusal degrades to the last pushed status rather than an error.
 
+## Published policy URLs
+
+Paste these into the Developer Dashboard. They are live now — check them before
+you submit rather than after, because a reviewer following a dead privacy link is
+a rejection, and this collection has already shipped one extension whose in-product
+legal links pointed at a host that did not exist.
+
+```
+Privacy policy   https://personal-website.xiangli3625.workers.dev/legal/night-neutralizer/privacy
+```
+
+The copy in this repository is the original. The portfolio site keeps a vendored
+copy and its test suite diffs the two, so edit the file here and re-copy — never
+the published page on its own.
+
 ## Privacy disclosures for the Developer Dashboard
 
 **Does this extension collect or use user data? No.** Nothing is transmitted off the device, to the developer or to anyone else. Leave every category unchecked:
