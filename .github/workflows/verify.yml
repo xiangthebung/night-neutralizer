@@ -11,7 +11,7 @@ jobs:
     name: typecheck + unit tests + build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Node 24, not 20. Two hard floors sit above 20 and both fail at module
       # load rather than in a test, which makes them look like flakes:
@@ -21,7 +21,7 @@ jobs:
       #   - scripts/smoke.mjs speaks CDP over the global WebSocket, unflagged from
       #     Node 22 only, so on 20 it aborts with "WebSocket is not defined".
       # jsdom's own engines field is ^22.22.2 || ^24.15.0 || >=26.0.0.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
@@ -34,7 +34,7 @@ jobs:
       # so a broken zip step fails CI rather than release day.
       - run: npm run zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: night-neutralizer-unpacked
           path: dist/
@@ -44,11 +44,11 @@ jobs:
     name: end-to-end in real Chrome
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # See the note in the verify job: the smoke script needs the global
       # WebSocket, which is only unflagged from Node 22.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
