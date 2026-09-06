@@ -29,7 +29,14 @@ import {
 import { evaluateGate, gateRecheckDelayMs, type GateResult } from '../core/gate';
 import { minutesOfDay } from '../core/schedule';
 import { isMusicHost } from '../core/music';
-import { MSG } from '../core/messages';
+import {
+  LIVE,
+  LIVE_PORT,
+  METER_INTERVAL_MS,
+  MSG,
+  type LiveHoldMessage,
+  type LiveMeterMessage,
+} from '../core/messages';
 import { type FrameStatus, type Settings } from '../core/types';
 import { debug } from '../core/log';
 import { MediaRegistry } from './media-registry';
@@ -322,6 +329,62 @@ function main(): void {
       if (message?.type !== MSG.STATUS_REQUEST) return undefined;
       sendResponse(snapshot() satisfies Omit<FrameStatus, 'frameId'>);
       return undefined;
+    });
+  }
+
+  /* ------------------------------ live port ------------------------------ */
+
+  /**
+   * Ports currently holding Compare. A set rather than a flag, because two
+   * popups (two windows) can be open on the same tab: the sound and picture
+   * come back when the *last* button is released, and a port going away counts
+   * as its button coming up — which is what makes a popup closing mid-hold
+   * safe.
+   */
+  const holders = new Set<chrome.runtime.Port>();
+
+  const syncHold = (): void => {
+    const held = holders.size > 0;
+    audio.setHold(held);
+    video.setHold(held);
+    images.setHold(held);
+  };
+
+  const meterMessage = (): LiveMeterMessage => ({
+    type: LIVE.METER,
+    top: isTopFrame,
+    held: holders.size > 0,
+    audio: audio.getMeter(),
+    video: video.getMeter(),
+  });
+
+  if (chrome?.runtime?.onConnect) {
+    chrome.runtime.onConnect.addListener((port) => {
+      if (port.name !== LIVE_PORT) return;
+      let timer: ReturnType<typeof setInterval> | null = null;
+      const cleanup = (): void => {
+        if (timer) clearInterval(timer);
+        timer = null;
+        if (holders.delete(port)) syncHold();
+      };
+      const send = (): void => {
+        try {
+          port.postMessage(meterMessage());
+        } catch {
+          // The popup went away between the disconnect and this tick.
+          cleanup();
+        }
+      };
+      port.onMessage.addListener((message: LiveHoldMessage) => {
+        if (message?.type !== LIVE.HOLD) return;
+        if (message.held) holders.add(port);
+        else holders.delete(port);
+        syncHold();
+        send();
+      });
+      port.onDisconnect.addListener(cleanup);
+      timer = setInterval(send, METER_INTERVAL_MS);
+      send();
     });
   }
 

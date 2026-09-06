@@ -32,6 +32,7 @@ const entryPoints = {
   content: path.join(src, 'content', 'index.ts'),
   'service-worker': path.join(src, 'background', 'service-worker.ts'),
   popup: path.join(src, 'popup', 'popup.ts'),
+  welcome: path.join(src, 'welcome', 'welcome.ts'),
 };
 
 /** @type {import('esbuild').BuildOptions} */
@@ -57,6 +58,12 @@ async function copyStatic() {
 
   for (const file of ['popup.html', 'popup.css']) {
     await writeFile(path.join(out, file), await readFile(path.join(src, 'popup', file)));
+  }
+  // The welcome page opened on install: an extension page with the popup's
+  // visual identity and a self-contained demonstration, bundled like the popup
+  // rather than fetched from anywhere.
+  for (const file of ['welcome.html', 'welcome.css']) {
+    await writeFile(path.join(out, file), await readFile(path.join(src, 'welcome', file)));
   }
 
   await mkdir(path.join(out, 'icons'), { recursive: true });

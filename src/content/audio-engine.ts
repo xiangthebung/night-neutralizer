@@ -34,10 +34,18 @@
  *  - The source node is only created once the AudioContext is actually
  *    running. Connecting a media element to a suspended context silences it,
  *    so we never take that risk.
- *  - Cross-origin media without CORS produces a silent graph. Such elements
- *    are classified as `risky` and verified with a short silence probe; if the
- *    probe fails we close the context, which hands playback back to the
- *    element untouched.
+ *  - Cross-origin media without CORS produces a silent graph, by specification:
+ *    a `MediaElementAudioSourceNode` on a CORS-cross-origin resource outputs
+ *    silence, and a plain cross-origin `src` with no `crossorigin` attribute is
+ *    fetched no-cors and so is always CORS-cross-origin. Such elements are
+ *    classified `risky` (`core/media-origin.ts`) and are *not* routed through
+ *    a graph at all. They used to be routed and then verified with a 2.5 s
+ *    silence probe that rolled the graph back, which cost two and a half
+ *    seconds of silence at the start of every such player and could be fooled
+ *    by a genuinely silent intro. The classification is what the probe was
+ *    confirming, and the spec makes it deterministic, so the probe is gone:
+ *    the element plays natively from its first sample and the popup says
+ *    the sound cannot be processed.
  *  - Element `volume`/`muted` are applied by the element before the graph, so
  *    site volume sliders, mute buttons and keyboard shortcuts keep working.
  */
@@ -45,16 +53,18 @@ import type { AudioParams, AudioState, EqParams, SoftClipParams } from '../core/
 import { dbToGain } from '../core/math';
 import { IDENTITY_SOFT_CLIP, buildSoftClipCurve } from '../core/soft-clip';
 import { neutralEqParams } from '../core/strength';
+import { audioGainNowDb } from '../core/meter';
 import { classifyElement, type MediaOriginClass } from '../core/media-origin';
 import { isMusicMedia } from '../core/music';
 import { debug } from '../core/log';
 
 /** Chromium historically caps concurrent AudioContexts; stay well under it. */
 const MAX_CONTEXTS = 4;
-const PROBE_INTERVAL_MS = 100;
-const PROBE_TICKS = 25; // ~2.5 s
-const MAX_PROBE_ATTEMPTS = 2;
 const RAMP_SECONDS = 0.12;
+
+/** The popup's wording for a player whose sound cannot be routed through Web Audio. */
+export const CROSS_ORIGIN_AUDIO_NOTE =
+  "This player's sound can't be processed: it is served cross-origin without CORS headers, so Web Audio would only hear silence.";
 
 let liveContexts = 0;
 
@@ -73,8 +83,6 @@ interface Graph {
   /** Scales into the soft clipper's input domain (1 / headroom). */
   safetyTrim: GainNode;
   safetyShaper: WaveShaperNode;
-  analyser: AnalyserNode;
-  probeBuffer: Float32Array<ArrayBuffer>;
 }
 
 function rampParam(param: AudioParam, value: number, now: number, seconds = RAMP_SECONDS): void {
@@ -97,12 +105,15 @@ class ElementAudioProcessor {
   private state: ProcessorState = 'idle';
   private params: AudioParams | null = null;
   private engaged = false;
+  /** True while the popup's Compare is held: the graph runs transparent. */
+  private held = false;
   private originClass: MediaOriginClass = 'empty';
-  private probeTimer: ReturnType<typeof setInterval> | null = null;
-  private probeTicks = 0;
-  private probeAttempts = 0;
-  private probeSilent = true;
-  private probeStartTime = -1;
+  /**
+   * Set when `blocked` was decided from the source's origin alone. That
+   * verdict is retractable — a player that swaps in a same-origin or MSE
+   * source becomes processable — where the other reasons for `blocked` are not.
+   */
+  private blockedByOrigin = false;
   private safetySignature = '';
   private note: string | null = null;
   private destroyed = false;
@@ -160,8 +171,40 @@ class ElementAudioProcessor {
     // A graph already exists. It cannot be safely removed (detaching a media
     // element from a live source node silences it), so bypass is implemented
     // as a transparent parameter set: ratio 1, unity gains, 0 dB thresholds.
-    this.applyParams(wantsProcessing ? (params as AudioParams) : null);
+    this.applyParams(this.liveParams());
     this.setState(wantsProcessing ? 'active' : 'bypassed');
+  }
+
+  /** The parameters the graph should be running right now, or null for transparent. */
+  private liveParams(): AudioParams | null {
+    if (this.held || !this.engaged) return null;
+    return this.params;
+  }
+
+  /**
+   * Compare: run the graph transparent while the popup's button is held. The
+   * reported state stays `active`, because the player is still being handled
+   * and the popup says "Comparing" on its own account; only the sound changes.
+   */
+  setHold(held: boolean): void {
+    if (this.destroyed || this.held === held) return;
+    this.held = held;
+    if (this.graph) this.applyParams(this.liveParams());
+  }
+
+  /**
+   * Net gain on the signal at this instant, in dB, or null when nothing is
+   * being processed or nothing is playing. Read straight off the compressor
+   * nodes' `reduction`, which is the one live measurement Web Audio exposes.
+   */
+  gainNowDb(): number | null {
+    const graph = this.graph;
+    const params = this.liveParams();
+    if (!graph || !params || this.state !== 'active') return null;
+    if (this.element.paused || this.element.ended || graph.context.state !== 'running') {
+      return null;
+    }
+    return audioGainNowDb(params, graph.compressor.reduction, graph.limiter.reduction);
   }
 
   private setState(next: ProcessorState): void {
@@ -205,6 +248,15 @@ class ElementAudioProcessor {
 
     this.originClass = classifyElement(this.element, this.pageOrigin);
     if (this.originClass === 'empty') return; // wait for loadedmetadata
+    if (this.originClass === 'risky') {
+      // Routing this element would silence it, deterministically (see the
+      // header). Say so now rather than after two and a half seconds of
+      // nothing; the element keeps playing natively, untouched.
+      this.blockedByOrigin = true;
+      this.setNote(CROSS_ORIGIN_AUDIO_NOTE);
+      this.setState('blocked');
+      return;
+    }
 
     let context: AudioContext;
     try {
@@ -292,8 +344,6 @@ class ElementAudioProcessor {
       // 'none' keeps the identity region bit-exact and adds no latency; the
       // curve is smooth enough that the aliasing on rare peaks is negligible.
       safetyShaper.oversample = 'none';
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 1024;
 
       source.connect(preGain);
       preGain.connect(lowShelf);
@@ -304,9 +354,6 @@ class ElementAudioProcessor {
       limiter.connect(safetyTrim);
       safetyTrim.connect(safetyShaper);
       safetyShaper.connect(context.destination);
-      // Tap for the silence probe. An analyser has no output connection, so it
-      // never affects the audible signal.
-      safetyShaper.connect(analyser);
 
       this.graph = {
         context,
@@ -319,18 +366,14 @@ class ElementAudioProcessor {
         limiter,
         safetyTrim,
         safetyShaper,
-        analyser,
-        probeBuffer: new Float32Array(analyser.fftSize),
       };
 
       context.addEventListener('statechange', this.onContextStateChange);
 
-      this.applyParams(this.engaged ? this.params : null, 0.01);
+      this.applyParams(this.liveParams(), 0.01);
       this.setState(this.engaged ? 'active' : 'bypassed');
       this.setNote(null);
       debug('audio graph attached', { origin: this.originClass, element: this.element.tagName });
-
-      if (this.originClass === 'risky') this.startProbe();
     } catch (error) {
       debug('failed to build audio graph', error);
       void context.close().catch(() => undefined);
@@ -431,87 +474,31 @@ class ElementAudioProcessor {
     }
   }
 
-  /** The element loaded a different resource: re-check whether it is safe. */
+  /**
+   * The element loaded a different resource: re-check whether it is safe.
+   *
+   * A verdict of `blocked` reached from the origin alone is withdrawn here,
+   * because it was about the *previous* source: a player that started on a
+   * cross-origin file and moved to MSE, or to its own host, is processable
+   * from now on. Once a graph exists the source cannot become unsafe — the
+   * graph was built from a safe one, and a media element's source node is
+   * permanent — so an existing graph is left alone.
+   */
   private onSourceChanged(): void {
     if (this.destroyed) return;
     const next = classifyElement(this.element, this.pageOrigin);
-    const previous = this.originClass;
     this.originClass = next;
-    if (!this.graph) {
-      if (this.engaged) this.maybeEngage();
-      return;
+    if (this.graph) return;
+    if (this.blockedByOrigin && next !== 'risky') {
+      this.blockedByOrigin = false;
+      this.setNote(null);
+      this.setState('idle');
     }
-    if (next === 'risky' && previous !== 'risky') {
-      this.probeAttempts = 0;
-      this.startProbe();
-    }
-  }
-
-  /**
-   * Verify that audio actually flows through the graph. Cross-origin media
-   * without CORS yields digital silence; if we see nothing but exact zeros for
-   * 2.5 s of real playback we roll the graph back.
-   */
-  private startProbe(): void {
-    if (this.probeTimer || !this.graph) return;
-    if (this.probeAttempts >= MAX_PROBE_ATTEMPTS) return;
-    this.probeAttempts++;
-    this.probeTicks = 0;
-    this.probeSilent = true;
-    this.probeStartTime = -1;
-
-    this.probeTimer = setInterval(() => this.probeTick(), PROBE_INTERVAL_MS);
-  }
-
-  private stopProbe(): void {
-    if (this.probeTimer) {
-      clearInterval(this.probeTimer);
-      this.probeTimer = null;
-    }
-  }
-
-  private probeTick(): void {
-    const graph = this.graph;
-    if (!graph || this.destroyed) {
-      this.stopProbe();
-      return;
-    }
-    const element = this.element;
-    const audible =
-      !element.paused && !element.muted && element.volume > 0 && element.readyState >= 2;
-    if (!audible || graph.context.state !== 'running') return;
-
-    if (this.probeStartTime < 0) this.probeStartTime = element.currentTime;
-
-    graph.analyser.getFloatTimeDomainData(graph.probeBuffer);
-    for (let i = 0; i < graph.probeBuffer.length; i++) {
-      if ((graph.probeBuffer[i] as number) !== 0) {
-        this.probeSilent = false;
-        break;
-      }
-    }
-
-    this.probeTicks++;
-    if (!this.probeSilent) {
-      this.stopProbe();
-      return;
-    }
-    if (this.probeTicks < PROBE_TICKS) return;
-
-    this.stopProbe();
-    const advanced = element.currentTime > this.probeStartTime + 0.5;
-    if (!advanced) return; // playback stalled: inconclusive, try again later
-
-    debug('silent graph detected, rolling back to native playback');
-    this.teardown(
-      'Audio left unprocessed: this player serves cross-origin media without CORS headers.',
-      'blocked',
-    );
+    if (this.engaged) this.maybeEngage();
   }
 
   /** Close the context, which returns audio output to the element itself. */
   private teardown(note: string | null, state: ProcessorState): void {
-    this.stopProbe();
     const graph = this.graph;
     this.graph = null;
     if (graph) {
@@ -526,13 +513,13 @@ class ElementAudioProcessor {
         graph.limiter.disconnect();
         graph.safetyTrim.disconnect();
         graph.safetyShaper.disconnect();
-        graph.analyser.disconnect();
       } catch {
         /* already disconnected */
       }
       void graph.context.close().catch(() => undefined);
       liveContexts = Math.max(0, liveContexts - 1);
     }
+    this.blockedByOrigin = false;
     this.setNote(note);
     this.setState(state);
   }
@@ -558,6 +545,12 @@ export interface AudioEngineStatus {
   /** Elements deliberately left uncompressed because they are playing music. */
   music: number;
   notes: string[];
+}
+
+/** What the chain is doing to the signal right now; see `LiveMeterMessage`. */
+export interface AudioMeter {
+  active: boolean;
+  gainDb: number | null;
 }
 
 /** Whether to leave music alone, and whether this frame's host is a music service. */
@@ -616,6 +609,29 @@ export class AudioEngine {
    */
   refresh(): void {
     this.applyAll();
+  }
+
+  /** Compare: every processed player runs transparent while `held`. */
+  setHold(held: boolean): void {
+    for (const processor of this.processors.values()) processor.setHold(held);
+  }
+
+  /**
+   * The largest gain any playing, processed element is receiving right now.
+   * The largest rather than the average, because a page normally has one
+   * player that matters and the meter should follow it, not be diluted by an
+   * idle one.
+   */
+  getMeter(): AudioMeter {
+    let gainDb: number | null = null;
+    let active = false;
+    for (const processor of this.processors.values()) {
+      if (!processor.isProcessing()) continue;
+      active = true;
+      const now = processor.gainNowDb();
+      if (now !== null && (gainDb === null || now > gainDb)) gainDb = now;
+    }
+    return { active, gainDb };
   }
 
   private applyAll(): void {

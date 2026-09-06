@@ -84,8 +84,11 @@ async function bundleStrengthMapping() {
   const result = await esbuild.build({
     stdin: {
       contents: `
-        export { mapAudioStrength, mapEqStrength, audioTransferDb } from './src/core/strength';
+        export { mapAudioStrength, mapEqStrength, mapVideoStrength, audioTransferDb } from './src/core/strength';
         export { buildSoftClipCurve, isIdentitySoftClip } from './src/core/soft-clip';
+        export { buildToneCurve, curveToTableValues, staticAdaptState } from './src/core/tone-curve';
+        export { describeStaticVideoEffect, describeVideoEffect } from './src/core/readings';
+        export { presetById } from './src/core/presets';
       `,
       resolveDir: root,
       loader: 'ts',
@@ -524,12 +527,16 @@ class Cdp {
     });
   }
 
-  async eval(expression) {
-    const result = await this.send('Runtime.evaluate', {
-      expression,
-      awaitPromise: true,
-      returnByValue: true,
-    });
+  async eval(expression, timeoutMs = 20_000) {
+    const result = await this.send(
+      'Runtime.evaluate',
+      {
+        expression,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      timeoutMs,
+    );
     if (result.exceptionDetails) {
       throw new Error(result.exceptionDetails.exception?.description ?? 'evaluation failed');
     }
@@ -561,6 +568,23 @@ async function newTab(url) {
   if (!response.ok) throw new Error(`could not open tab: ${response.status}`);
   return response.json();
 }
+
+async function closeTab(id) {
+  await fetch(`http://127.0.0.1:${CDP_PORT}/json/close/${id}`).catch(() => undefined);
+}
+
+/**
+ * Whether a 33-entry LUT is something other than the identity. The curve is
+ * scene-gated, so "the filter is installed" and "the filter is doing anything"
+ * are different questions, and several checks below ask the second one.
+ */
+const deviatesFromIdentity = (raw) => {
+  const values = String(raw ?? '')
+    .split(' ')
+    .map(Number);
+  if (values.length < 2 || values.some((v) => !Number.isFinite(v))) return false;
+  return values.some((v, i) => Math.abs(v - i / (values.length - 1)) > 0.005);
+};
 
 /* --------------------------------- runner --------------------------------- */
 
@@ -665,6 +689,7 @@ async function main() {
         video: true,
         images: true,
         videoStrength: strength ?? 45,
+        protectedBrightness: 75,
         darkMode: false,
         nightOnly: false,
         nightStart: 21 * 60,
@@ -673,6 +698,138 @@ async function main() {
       });
       await sw.eval(`chrome.storage.sync.set({ settings: ${settings} })`);
     };
+
+    /* -------- the welcome page, opened by the install itself -------- */
+    // `Extensions.loadUnpacked` is an install, so `onInstalled` fires with
+    // reason `install` and the worker opens the page. It has to be the page
+    // and it has to be one page: an install that opened two, or an update
+    // that opened one, would be the bug.
+    const WELCOME_URL = `chrome-extension://${extensionId}/welcome.html`;
+    const welcomeTarget = await waitFor('welcome page', async () => {
+      const targets = await listTargets();
+      return targets.find((t) => t.type === 'page' && t.url === WELCOME_URL);
+    }).catch(() => null);
+    const welcomeCount = (await listTargets()).filter(
+      (t) => t.type === 'page' && t.url === WELCOME_URL,
+    ).length;
+    check(
+      'installing opens the welcome page, once',
+      Boolean(welcomeTarget) && welcomeCount === 1,
+      welcomeTarget ? `${welcomeCount} welcome tab(s)` : 'no welcome tab was opened',
+    );
+
+    const welcome = welcomeTarget
+      ? await new Cdp(welcomeTarget.webSocketDebuggerUrl).connect()
+      : null;
+    if (welcome) {
+      await welcome.send('Runtime.enable');
+      await browser.send('Target.activateTarget', { targetId: welcomeTarget.id }).catch(() => {});
+      await sleep(1500);
+
+      // The demonstration is the real tone curve on a scene the page draws
+      // itself: the "after" canvas carries the same `feComponentTransfer`
+      // filter the content script uses, and its table has to move as the
+      // scene does, or it is a picture of an effect rather than the effect.
+      const welcomeTable = () =>
+        welcome.eval(
+          `document.querySelector('#nn-welcome-transfer feFuncR')?.getAttribute('tableValues') ?? ''`,
+        );
+      const welcomeTables = new Set();
+      for (let i = 0; i < 12; i++) {
+        welcomeTables.add(await welcomeTable());
+        await sleep(250);
+      }
+      const welcomeDemo = JSON.parse(
+        await welcome.eval(`(() => {
+          const before = document.getElementById('before');
+          const after = document.getElementById('after');
+          const ctx = before.getContext('2d');
+          const data = ctx.getImageData(0, 0, before.width, before.height).data;
+          let sum = 0;
+          for (let i = 0; i < data.length; i += 4) sum += data[i] + data[i + 1] + data[i + 2];
+          return JSON.stringify({
+            painted: sum / (data.length / 4) / 3 / 255,
+            filter: getComputedStyle(after).filter,
+            meter: document.getElementById('video-meter').textContent,
+            chips: [...document.querySelectorAll('.chip')].map((c) => c.dataset.preset),
+          });
+        })()`),
+      );
+      check(
+        'the welcome demonstration runs the real, adapting tone curve on its own scene',
+        welcomeDemo.painted > 0.005 &&
+          welcomeDemo.filter.includes('nn-welcome-curve') &&
+          welcomeTables.size > 1 &&
+          [...welcomeTables].some(deviatesFromIdentity),
+        `${welcomeTables.size} distinct curves in 3 s, after-canvas filter ${welcomeDemo.filter}`,
+      );
+      check(
+        'and meters the scene the way the popup does',
+        /light now|Picture as is now/.test(welcomeDemo.meter) &&
+          welcomeDemo.chips.join(',') === 'dialogue,bedtime,balanced',
+        `"${welcomeDemo.meter}", chips ${welcomeDemo.chips.join('/')}`,
+      );
+
+      // "Try it now": the reason the page exists. With the shipped default the
+      // extension does nothing until nine, so the page offers to switch the
+      // restriction off until Chrome restarts — recorded in storage.local, and
+      // put back by the worker's onStartup (covered in the unit suite).
+      await writeSettings({
+        nightOnly: true,
+        nightStart: shiftMinutes(120),
+        nightEnd: shiftMinutes(240),
+      });
+      const tryShown = await waitFor('try-it-now button', () =>
+        welcome.eval(`!document.getElementById('try-now').hidden`),
+      ).catch(() => false);
+      await welcome.eval(`document.getElementById('try-now').click(); true`);
+      const tried = await waitFor('night trial started', async () => {
+        const raw = await sw.eval(
+          `Promise.all([chrome.storage.sync.get('settings'), chrome.storage.local.get('nightTrial')])
+             .then(([s, l]) => JSON.stringify({ nightOnly: s.settings?.nightOnly, trial: l.nightTrial }))`,
+        );
+        const state = JSON.parse(raw ?? '{}');
+        return state.nightOnly === false && state.trial === true ? state : false;
+      }).catch(() => null);
+      const tryNote = await welcome.eval(`document.getElementById('try-note').textContent`);
+      check(
+        '"Try it now" switches the night restriction off for the session, and says so',
+        tryShown === true && Boolean(tried) && /running now/i.test(tryNote ?? ''),
+        tried ? `nightOnly=${tried.nightOnly}, trial flag=${tried.trial}, "${tryNote}"` : 'no trial recorded',
+      );
+
+      // The chips on this page write the same patches as the popup's.
+      await welcome.eval(`document.querySelector('.chip[data-preset="bedtime"]').click(); true`);
+      const bedtime = await waitFor('bedtime preset stored', async () => {
+        const stored = JSON.parse(
+          (await sw.eval(
+            `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+          )) ?? '{}',
+        );
+        return stored.darkMode === true && stored.audioStrength === 70 ? stored : false;
+      }).catch(() => null);
+      check(
+        'the welcome presets write the same settings the popup chips do',
+        Boolean(bedtime) && bedtime.nightEq === true && bedtime.videoStrength === 70,
+        bedtime
+          ? `sound ${bedtime.audioStrength} eq=${bedtime.nightEq}, picture ${bedtime.videoStrength}, dark=${bedtime.darkMode}`
+          : 'not stored',
+      );
+
+      check(
+        'no console errors on the welcome page',
+        welcome.consoleErrors.length === 0,
+        welcome.consoleErrors.slice(0, 3).join(' | '),
+      );
+      welcome.close();
+      // Closed before the measurements below: its canvases repaint on every
+      // animation frame, and a second busy renderer would show up in the
+      // frame-cadence and CPU-cost figures as if the extension had regressed.
+      await closeTab(welcomeTarget.id);
+      // Back to the baseline, including the trial flag the button set.
+      await sw.eval(`chrome.storage.local.set({ nightTrial: false })`);
+      await writeSettings({});
+    }
 
     // Before the page opens, so the first assertions below are not racing the
     // night gate.
@@ -771,11 +928,6 @@ async function main() {
     // frame that needs treatment has been measured, so poll rather than race.
     // The animated clip cycles through dark and bright phases, either of which
     // must move it within a cycle.
-    const deviatesFromIdentity = (raw) => {
-      const values = raw.split(' ').map(Number);
-      if (values.length < 2 || values.some((v) => !Number.isFinite(v))) return false;
-      return values.some((v, i) => Math.abs(v - i / (values.length - 1)) > 0.005);
-    };
     let firstCurve = await curveNow();
     const curveDeadline = Date.now() + 10_000;
     while (!deviatesFromIdentity(firstCurve) && Date.now() < curveDeadline) {
@@ -874,19 +1026,37 @@ async function main() {
     );
 
     /* -------- status pipeline + engine states -------- */
-    const readStatus = async () => {
-      const data = await sw.eval(
-        `chrome.storage.session.get('frameStatus').then(r => JSON.stringify(r.frameStatus ?? {}))`,
+    const readStatusMap = async () =>
+      JSON.parse(
+        (await sw.eval(
+          `chrome.storage.session.get('frameStatus').then(r => JSON.stringify(r.frameStatus ?? {}))`,
+        )) ?? '{}',
       );
-      const frames = Object.values(JSON.parse(data ?? '{}')).flatMap((t) => Object.values(t));
-      return frames.find((f) => f.top && f.mediaElements > 0) ?? null;
+    /**
+     * The bench tab's key in the status map, learnt from its first report. A
+     * second tab with media is opened further down (the cross-origin case),
+     * so "the top frame with media" stops being unique and the reads below
+     * name the tab they mean.
+     */
+    let benchKey = null;
+    const readStatus = async (key = benchKey) => {
+      const map = await readStatusMap();
+      const entries = key === null ? Object.entries(map) : [[key, map[key] ?? {}]];
+      for (const [tabKey, frames] of entries) {
+        const top = Object.values(frames).find((f) => f.top && f.mediaElements > 0);
+        if (top) {
+          if (benchKey === null) benchKey = tabKey;
+          return top;
+        }
+      }
+      return null;
     };
     /** Poll until the predicate holds, then report whatever was last seen. */
-    const awaitStatus = async (predicate, timeout = 12_000) => {
+    const awaitStatus = async (predicate, timeout = 12_000, key = undefined) => {
       const deadline = Date.now() + timeout;
       let last = null;
       while (Date.now() < deadline) {
-        last = await readStatus();
+        last = await readStatus(key === undefined ? benchKey : key);
         if (last && predicate(last)) return last;
         await sleep(400);
       }
@@ -1820,10 +1990,268 @@ async function main() {
       JSON.stringify(nested),
     );
 
-    /* -------- the popup's own query path -------- */
-    const pageTabId = await sw.eval(
-      `chrome.storage.session.get('frameStatus').then(r => Number(Object.keys(r.frameStatus ?? {})[0] ?? -1))`,
+    /* -------- a player served cross-origin without CORS -------- */
+    /*
+     * The case every CDN-backed player is: the file comes from another origin
+     * with no `crossorigin` attribute, so a Web Audio source node on it would
+     * output silence by specification and its frames cannot be read back. The
+     * extension used to route the sound anyway and listen for 2.5 s of exact
+     * zeros before rolling back — two and a half seconds of silence at the
+     * start of every such player. It now refuses up front, and this section
+     * measures how fast, and that the picture still gets the fixed curve at
+     * the exposure the new setting asks for.
+     *
+     * `localhost` and `127.0.0.1` are different origins, so the bench records
+     * a clip of its own scene, hands it to the bench server, and a second page
+     * plays it back under the other host name. No binary lives in the repo.
+     */
+    await writeSettings({ strength: 45 });
+    const clipBytes = await page.eval(
+      `(async () => {
+         const canvas = document.getElementById('source');
+         const stream = canvas.captureStream(30);
+         const audio = new AudioContext();
+         const osc = audio.createOscillator();
+         osc.frequency.value = 220;
+         const gain = audio.createGain();
+         gain.gain.value = 0.2;
+         const sink = audio.createMediaStreamDestination();
+         osc.connect(gain);
+         gain.connect(sink);
+         osc.start();
+         for (const track of sink.stream.getAudioTracks()) stream.addTrack(track);
+         await audio.resume().catch(() => undefined);
+         const recorder = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8,opus' });
+         const chunks = [];
+         recorder.ondataavailable = (event) => chunks.push(event.data);
+         const stopped = new Promise((resolve) => (recorder.onstop = resolve));
+         recorder.start(250);
+         // One full scene cycle: night interior, cut to snow, fade back, flash.
+         await new Promise((resolve) => setTimeout(resolve, 9600));
+         recorder.stop();
+         await stopped;
+         osc.stop();
+         await audio.close().catch(() => undefined);
+         const blob = new Blob(chunks, { type: 'video/webm' });
+         const response = await fetch('/blob/clip.webm', {
+           method: 'PUT',
+           headers: { 'content-type': 'video/webm' },
+           body: blob,
+         });
+         return response.ok ? blob.size : -response.status;
+       })()`,
+      40_000,
     );
+    check(
+      'the bench recorded a clip of its scene for the cross-origin case',
+      clipBytes > 20_000,
+      `${clipBytes} bytes`,
+    );
+
+    const crossTab = await newTab(PAGE_URL.replace('index.html', 'cross.html'));
+    await browser.send('Target.activateTarget', { targetId: crossTab.id }).catch(() => {});
+    const cross = await new Cdp(crossTab.webSocketDebuggerUrl).connect();
+    await cross.send('Runtime.enable');
+    await cross.send('Page.enable').catch(() => {});
+    await waitFor('cross-origin clip loaded', () =>
+      cross.eval(`document.getElementById('cross').readyState >= 2`),
+    );
+    const crossKey = await waitFor('cross tab reports', async () => {
+      const map = await readStatusMap();
+      const key = Object.keys(map).find((k) => k !== benchKey);
+      const top = key ? Object.values(map[key]).find((f) => f.top) : null;
+      return top && top.mediaElements > 0 ? key : false;
+    });
+
+    const notYet = await readStatus(crossKey);
+    check(
+      'a player that has not started reads as waiting, not as nothing to do',
+      notYet?.audio.state === 'idle' && notYet?.video.mode === 'idle',
+      `audio=${notYet?.audio.state} video=${notYet?.video.mode}`,
+    );
+
+    // Play, and time how long the sound takes to be handed to the player.
+    const playedAt = Date.now();
+    await cross.eval(`document.getElementById('play').click(); true`);
+    let blockedAfterMs = null;
+    let crossStatus = null;
+    while (Date.now() - playedAt < 6000) {
+      crossStatus = await readStatus(crossKey);
+      if (crossStatus?.audio.state === 'blocked') {
+        blockedAfterMs = Date.now() - playedAt;
+        break;
+      }
+      await sleep(100);
+    }
+    check(
+      'cross-origin sound is left to the player at once, not after a probe',
+      blockedAfterMs !== null && blockedAfterMs < 1500 && crossStatus?.audio.processed === 0,
+      blockedAfterMs === null
+        ? `never reported blocked (audio=${crossStatus?.audio.state})`
+        : `blocked ${blockedAfterMs} ms after play (was ~2.7 s with the silence probe)`,
+    );
+    check(
+      'and the note says why in the popup’s words',
+      (crossStatus?.notes ?? []).some((note) => /sound can't be processed/i.test(note)),
+      (crossStatus?.notes ?? []).join(' | '),
+    );
+
+    const crossVideo = await awaitStatus((s) => s.video.mode === 'static', 8000, crossKey);
+    const crossRule = await cross.eval(
+      `document.getElementById('nn-tone-style')?.textContent ?? ''`,
+    );
+    check(
+      'the picture still gets the fixed curve, reported as static rather than adaptive',
+      crossVideo?.video.mode === 'static' &&
+        crossRule.includes('url(') &&
+        (crossVideo?.notes ?? []).some((note) => /cross-origin/i.test(note)),
+      `video=${crossVideo?.video.mode}, ${(crossVideo?.notes ?? []).length} note(s)`,
+    );
+
+    // The one setting a protected player runs on. The table the content script
+    // writes has to be the curve `staticAdaptState` builds from it, at the
+    // exposure the setting names — and white has to actually come down at the
+    // shipped default, which it did not when the exposure was pinned at 1.
+    await page.eval(await bundleStrengthMapping()).catch(() => undefined);
+    const crossTable = () =>
+      cross.eval(
+        `document.querySelector('#nn-tone-curve feFuncR')?.getAttribute('tableValues') ?? ''`,
+      );
+    const expectedStatic = (brightness) =>
+      page.eval(
+        `(() => { const p = NNCore.mapVideoStrength(45, ${brightness});
+           return NNCore.curveToTableValues(NNCore.buildToneCurve(p, NNCore.staticAdaptState(p))); })()`,
+      );
+    const whiteOf = (table) => Number(String(table).split(' ').at(-1));
+    const tables = {};
+    for (const brightness of [100, 75, 50]) {
+      await writeSettings({ strength: 45, protectedBrightness: brightness });
+      const expected = await expectedStatic(brightness);
+      tables[brightness] = await waitFor(`static table at ${brightness}%`, async () => {
+        const table = await crossTable();
+        return table === expected ? table : false;
+      }).catch(async () => `(mismatch) ${await crossTable()}`);
+    }
+    check(
+      'the fixed curve is exactly the one the brightness setting describes',
+      Object.values(tables).every((table) => !table.startsWith('(mismatch)')),
+      Object.entries(tables)
+        .map(([b, t]) => `${b}%: white ${whiteOf(t).toFixed(3)}`)
+        .join(', '),
+    );
+    check(
+      'brightness on protected video dims white, and the default is a real dim',
+      whiteOf(tables[100]) > 0.9 &&
+        whiteOf(tables[75]) < whiteOf(tables[100]) - 0.15 &&
+        whiteOf(tables[50]) < whiteOf(tables[75]) - 0.1,
+      `white ${whiteOf(tables[100]).toFixed(3)} at 100%, ${whiteOf(tables[75]).toFixed(3)} at 75% (the default), ` +
+        `${whiteOf(tables[50]).toFixed(3)} at 50%`,
+    );
+
+    // Rendered pixels on the protected path, on a dark frame and a bright one.
+    // The clip is a recording of the bench scene at an unknown phase, so the
+    // two frames are found by measuring rather than assumed.
+    await cross.eval(`(() => {
+      window.__nnSeek = (t) => new Promise((resolve) => {
+        const v = document.getElementById('cross');
+        v.pause();
+        let settled = false;
+        const finish = (seeked) => {
+          if (settled) return;
+          settled = true;
+          resolve({ t: v.currentTime, seeked });
+        };
+        const onSeeked = () => finish(true);
+        v.addEventListener('seeked', onSeeked, { once: true });
+        // A MediaRecorder file has no cues, so a seek can fail: play through
+        // to the time instead and pause there.
+        setTimeout(async () => {
+          if (settled) return;
+          v.removeEventListener('seeked', onSeeked);
+          if (v.currentTime > t) v.currentTime = 0;
+          await v.play().catch(() => {});
+          const poll = setInterval(() => {
+            if (v.currentTime >= t || v.ended) {
+              clearInterval(poll);
+              v.pause();
+              finish(false);
+            }
+          }, 20);
+        }, 1500);
+        v.currentTime = t;
+      });
+      return true;
+    })()`);
+    const crossBox = async () => {
+      const raw = await cross.eval(
+        `(() => {
+           const v = document.getElementById('cross');
+           v.scrollIntoView({ block: 'center' });
+           const r = v.getBoundingClientRect();
+           return JSON.stringify({
+             x: Math.round(r.x + window.scrollX) + 3,
+             y: Math.round(r.y + window.scrollY) + 3,
+             width: Math.round(r.width) - 6,
+             height: Math.round(r.height) - 6,
+           });
+         })()`,
+      );
+      return { ...JSON.parse(raw), scale: 1 };
+    };
+    const captureCross = async () => {
+      const shot = await cross.send(
+        'Page.captureScreenshot',
+        { format: 'png', clip: await crossBox() },
+        30_000,
+      );
+      return lumaStats(await decodePng(Buffer.from(shot.data, 'base64')));
+    };
+    const seekCross = async (t) => {
+      await cross.eval(`__nnSeek(${t})`, 15_000);
+      await sleep(500);
+    };
+    // Find the darkest and the brightest second of the clip with nothing applied.
+    await writeSettings({ enabled: false, strength: 45 });
+    await sleep(600);
+    const candidates = [];
+    for (const t of [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]) {
+      await seekCross(t);
+      candidates.push({ t, ...(await captureCross()) });
+    }
+    const darkest = candidates.reduce((a, b) => (b.mean < a.mean ? b : a));
+    const brightest = candidates.reduce((a, b) => (b.mean > a.mean ? b : a));
+    const measureProtected = async (brightness, t) => {
+      await writeSettings({ enabled: true, strength: 45, protectedBrightness: brightness });
+      await seekCross(t);
+      await sleep(400);
+      return captureCross();
+    };
+    const brightAt100 = await measureProtected(100, brightest.t);
+    const brightAt75 = await measureProtected(75, brightest.t);
+    const darkAt75 = await measureProtected(75, darkest.t);
+    check(
+      'rendered pixels: the default dims a bright scene on a protected player, where exposure 1 barely did',
+      brightest.mean > 0.5 &&
+        brightAt75.mean < brightAt100.mean - 0.08 &&
+        brightAt100.mean < brightest.mean &&
+        brightAt75.p99 < brightest.p99 - 0.15,
+      `bright frame at t=${brightest.t}s: mean ${brightest.mean.toFixed(3)} off -> ${brightAt100.mean.toFixed(3)} at 100% ` +
+        `-> ${brightAt75.mean.toFixed(3)} at 75%; p99 ${brightest.p99.toFixed(3)} -> ${brightAt75.p99.toFixed(3)}`,
+    );
+    check(
+      'rendered pixels: the dark scene is still opened up at the default brightness',
+      darkest.mean < 0.2 && darkAt75.shadowBand > darkest.shadowBand * 1.3,
+      `dark frame at t=${darkest.t}s: shadow band ${darkest.shadowBand.toFixed(3)} off -> ${darkAt75.shadowBand.toFixed(3)} at 75%, ` +
+        `mean ${darkest.mean.toFixed(3)} -> ${darkAt75.mean.toFixed(3)}`,
+    );
+    await writeSettings({ strength: 70 });
+    // Leave the cross-origin clip playing for the popup checks further down.
+    await cross.eval(`document.getElementById('play').click(); true`);
+    await browser.send('Target.activateTarget', { targetId: tab.id }).catch(() => {});
+    await sleep(600);
+
+    /* -------- the popup's own query path -------- */
+    const pageTabId = Number(benchKey);
     const popupTab = await newTab(`chrome-extension://${extensionId}/popup.html`);
     const popup = await new Cdp(popupTab.webSocketDebuggerUrl).connect();
     await popup.send('Runtime.enable');
@@ -1845,6 +2273,10 @@ async function main() {
           pictureStatus: document.getElementById('picture-status').textContent,
           shortcutShown: !document.getElementById('shortcut').hidden,
           shortcutKeys: document.getElementById('shortcut-keys').textContent,
+          shortcutBoundShown: !document.getElementById('shortcut-bound').hidden,
+          shortcutNoneShown: !document.getElementById('shortcut-none').hidden,
+          shortcutNoneText: document.getElementById('shortcut-none').textContent.trim(),
+          shortcutEditShown: !document.getElementById('shortcut-edit').hidden,
           nightOnly: document.getElementById('night-only').checked,
           nightStart: document.getElementById('night-start').value,
           nightEnd: document.getElementById('night-end').value,
@@ -1870,17 +2302,23 @@ async function main() {
             .filter((row) => row.includes(',')),
        }))()`,
     );
-    // The hint must show the *real* accelerator and must stay hidden when there
-    // is none, rather than printing a shortcut that would do nothing.
+    // The hint must show the *real* accelerator, and when there is none it has
+    // to say so and still offer the way to set one: the row used to disappear
+    // entirely, which hid the only link that would have let the user bind it.
     check(
-      'popup surfaces the keyboard shortcut, and only when one is bound',
-      shortcutBound
-        ? popupState.shortcutShown === true &&
+      'popup surfaces the keyboard shortcut, or says none is set, with a way to change it',
+      popupState.shortcutShown === true &&
+        popupState.shortcutEditShown === true &&
+        (shortcutBound
+          ? popupState.shortcutBoundShown === true &&
+            popupState.shortcutNoneShown === false &&
             popupState.shortcutKeys === toggleCommand.shortcut
-        : popupState.shortcutShown === false,
+          : popupState.shortcutBoundShown === false &&
+            popupState.shortcutNoneShown === true &&
+            popupState.shortcutNoneText === 'No shortcut set ·'),
       shortcutBound
         ? `shows "${popupState.shortcutKeys}"`
-        : 'no accelerator bound in this profile, so the hint stays hidden',
+        : `no accelerator bound in this profile: "${popupState.shortcutNoneText} Change"`,
     );
     // The front of the popup is one switch and one slider per thing being
     // treated, and nothing else: everything that is decided once and then left
@@ -1897,7 +2335,7 @@ async function main() {
     check(
       'more options keeps each panel’s own settings with it',
       popupState.moreLayout[0] === 'Sound,night-eq,skip-music' &&
-        popupState.moreLayout[1] === 'Picture,video,images,dark-mode',
+        popupState.moreLayout[1] === 'Picture,video,images,protected-brightness,dark-mode',
       popupState.moreLayout.join(' | '),
     );
 
@@ -1952,8 +2390,29 @@ async function main() {
       `nightOnly=${popupState.nightOnly}, window shown=${popupState.nightWindowShown}`,
     );
 
+    // While the welcome page's trial is running, the line under the switch has
+    // to say the hours are coming back, or the restart that restores them
+    // looks like a bug. A hand on the switch ends the trial.
+    await sw.eval(`chrome.storage.local.set({ nightTrial: true })`);
+    const trialLine = await waitFor('night trial line', async () => {
+      // The popup reads the flag on load; a fresh poll does not re-read it, so
+      // re-render by nudging settings through storage.
+      await writeSettings({ strength: 70, nightOnly: false });
+      const text = await popup.eval(`document.getElementById('night-desc').textContent`);
+      return /off for a look/i.test(text ?? '') ? text : false;
+    }).catch(async () => popup.eval(`document.getElementById('night-desc').textContent`));
+    check(
+      'the popup says the night restriction is off for a look, not for good',
+      /off for a look/i.test(trialLine ?? '') && /restarts/i.test(trialLine ?? ''),
+      `"${trialLine}"`,
+    );
+
     await popup.eval(`document.getElementById('night-only').click(); true`);
     await sleep(400);
+    const trialEnded = await sw.eval(
+      `chrome.storage.local.get('nightTrial').then((r) => r.nightTrial === false)`,
+    );
+    check('touching the switch ends the trial, so a restart cannot overrule the user', trialEnded === true);
     const nightUi = await popup.eval(
       `(() => ({
           windowShown: !document.getElementById('night-window').hidden,
@@ -2250,6 +2709,292 @@ async function main() {
       `"${summaryUi.text}" (${summaryUi.dot})`,
     );
 
+    /* -------- the live block: the meter and Compare -------- */
+    /*
+     * The proof under the summary. Both ride a `chrome.tabs.connect` port to
+     * the content scripts rather than the status channel, because the meter
+     * has to move while a scene does and a held Compare has to end the moment
+     * the popup closes. Neither needs a permission.
+     */
+    // The bench's static wedge has been the primary video since the flash
+    // check. Hand the primary back to the animated scene first, or the meter
+    // has nothing to move with and the check below would be measuring the
+    // suite's own ordering.
+    await page.eval(
+      `(() => {
+         document.getElementById('wedge').pause();
+         document.getElementById('night-wedge').pause();
+         document.getElementById('play-video').click();
+         return true;
+       })()`,
+    );
+    await sleep(800);
+    const meterText = () => popup.eval(`document.getElementById('meter').textContent`);
+    const liveRow = await waitFor('live meter row', async () => {
+      const hidden = await popup.eval(`document.getElementById('live-row').hidden`);
+      const text = await meterText();
+      return !hidden && /dB now/.test(text) ? text : false;
+    }).catch(() => '');
+    const METER_LINE =
+      /^[+−±]\d+ dB now · (−\d+% light now|\+\d+% light now|\d+\.\d× light now|Picture as is now)$/;
+    check(
+      'the popup meters what the tab is applying at this moment',
+      METER_LINE.test(liveRow),
+      `"${liveRow}"`,
+    );
+    // Six seconds: longer than the scene's longest static phase (the 3.4 s
+    // night interior), so the window is certain to contain a cut or a fade
+    // whatever phase it opens in — a settled curve on a still scene is a
+    // constant reading, and correctly so.
+    const meterSamples = new Set();
+    for (let i = 0; i < 24; i++) {
+      meterSamples.add(await meterText());
+      await sleep(250);
+    }
+    check(
+      'and the meter moves with the scene rather than restating the settings',
+      meterSamples.size > 1 && [...meterSamples].every((line) => METER_LINE.test(line)),
+      `${meterSamples.size} distinct readings in 6 s: ${[...meterSamples].slice(0, 3).join(' / ')}`,
+    );
+
+    // Press and hold, with a real pointer. The curve has to come off the
+    // page's rule and the image rule while the button is down, the popup has
+    // to say so, and letting go has to put both back.
+    const compareBox = JSON.parse(
+      await popup.eval(`(() => {
+        const r = document.getElementById('compare').getBoundingClientRect();
+        return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+      })()`),
+    );
+    const pageRules = () =>
+      page.eval(`JSON.stringify({
+        video: document.getElementById('nn-tone-style')?.textContent ?? '',
+        image: document.getElementById('nn-image-tone-style')?.textContent ?? '',
+      })`).then((raw) => JSON.parse(raw));
+    const beforeHold = await pageRules();
+    await popup.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...compareBox });
+    await popup.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      ...compareBox,
+      button: 'left',
+      clickCount: 1,
+    });
+    const held = await waitFor('compare held', async () => {
+      const rules = await pageRules();
+      const ui = JSON.parse(
+        await popup.eval(`JSON.stringify({
+          pressed: document.getElementById('compare').getAttribute('aria-pressed'),
+          label: document.getElementById('compare').textContent.trim(),
+          meter: document.getElementById('meter').textContent,
+        })`),
+      );
+      return !rules.video.includes('url(') && ui.pressed === 'true' ? { rules, ui } : false;
+    }).catch(() => null);
+    const heldStatus = await readStatus();
+    await popup.send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      ...compareBox,
+      button: 'left',
+      clickCount: 1,
+    });
+    const released = await waitFor('compare released', async () => {
+      const rules = await pageRules();
+      const pressed = await popup.eval(
+        `document.getElementById('compare').getAttribute('aria-pressed')`,
+      );
+      return rules.video.includes('url(') && rules.image.includes('url(') && pressed === 'false'
+        ? rules
+        : false;
+    }).catch(() => null);
+    check(
+      'Hold to compare takes the curve off the tab for exactly as long as it is held',
+      beforeHold.video.includes('url(') &&
+        beforeHold.image.includes('url(') &&
+        Boolean(held) &&
+        !held.rules.image.includes('url(') &&
+        Boolean(released),
+      held
+        ? `video rule "${held.rules.video || '(empty)'}", image rule "${held.rules.image || '(empty)'}" while held; both back on release=${Boolean(released)}`
+        : 'the curve never came off',
+    );
+    check(
+      'and the popup says so while the sound and picture are the site’s own',
+      held?.ui.label === 'Comparing…' &&
+        held?.ui.meter === 'Original sound and picture' &&
+        heldStatus?.audio.state === 'active',
+      held ? `"${held.ui.label}" / "${held.ui.meter}", audio still ${heldStatus?.audio.state}` : '',
+    );
+
+    /* -------- presets -------- */
+    // Each chip is a claim about what a tap sets, and the line under the chips
+    // is the same claim in words; both are held to what actually lands in
+    // storage. Dialogue leaves the picture where it was.
+    const stored = async () =>
+      JSON.parse(
+        (await sw.eval(
+          `chrome.storage.sync.get('settings').then(r => JSON.stringify(r.settings ?? {}))`,
+        )) ?? '{}',
+      );
+    const presetUi = async () =>
+      JSON.parse(
+        await popup.eval(`JSON.stringify({
+          pressed: [...document.querySelectorAll('.chip')].filter((c) => c.getAttribute('aria-pressed') === 'true').map((c) => c.dataset.preset),
+          line: document.getElementById('preset-line').textContent,
+        })`),
+      );
+    await popup.eval(`document.querySelector('.chip[data-preset="dialogue"]').click(); true`);
+    await sleep(400);
+    const dialogue = await stored();
+    const dialogueUi = await presetUi();
+    const dialogueLine = await page.eval(`NNCore.presetById('dialogue').sets`);
+    check(
+      'the Dialogue chip turns the sound up with night EQ and leaves the picture alone',
+      dialogue.audioStrength === 70 &&
+        dialogue.nightEq === true &&
+        dialogue.videoStrength === 70 &&
+        dialogue.darkMode === false &&
+        dialogueUi.pressed.join() === 'dialogue' &&
+        dialogueUi.line === dialogueLine,
+      `sound ${dialogue.audioStrength} eq=${dialogue.nightEq}, picture ${dialogue.videoStrength}; "${dialogueUi.line}"`,
+    );
+    await popup.eval(`document.querySelector('.chip[data-preset="bedtime"]').click(); true`);
+    await sleep(400);
+    const bedtimeStored = await stored();
+    const bedtimeUi = await presetUi();
+    check(
+      'the Bedtime chip turns both up and switches dark mode on',
+      bedtimeStored.audioStrength === 70 &&
+        bedtimeStored.nightEq === true &&
+        bedtimeStored.videoStrength === 70 &&
+        bedtimeStored.darkMode === true &&
+        bedtimeUi.pressed.join() === 'bedtime',
+      `sound ${bedtimeStored.audioStrength}, picture ${bedtimeStored.videoStrength}, dark=${bedtimeStored.darkMode}; "${bedtimeUi.line}"`,
+    );
+    await popup.eval(`document.querySelector('.chip[data-preset="balanced"]').click(); true`);
+    await sleep(400);
+    const balanced = await stored();
+    const balancedUi = await presetUi();
+    check(
+      'the Balanced chip is the shipped defaults, and none of them touches the night window',
+      balanced.audioStrength === 45 &&
+        balanced.videoStrength === 45 &&
+        balanced.nightEq === false &&
+        balanced.darkMode === false &&
+        balanced.nightOnly === false &&
+        balanced.protectedBrightness === 75 &&
+        balancedUi.pressed.join() === 'balanced',
+      `sound ${balanced.audioStrength} eq=${balanced.nightEq}, picture ${balanced.videoStrength}, dark=${balanced.darkMode}, nightOnly=${balanced.nightOnly}`,
+    );
+
+    // The protected-video brightness is its own key, on its own range.
+    await popup.eval(
+      `(() => {
+         const slider = document.getElementById('protected-brightness');
+         slider.value = '50';
+         slider.dispatchEvent(new Event('input'));
+         return true;
+       })()`,
+    );
+    const brightnessStored = await waitFor('protected brightness stored', async () => {
+      const current = await stored();
+      return current.protectedBrightness === 50 ? current : false;
+    }).catch(() => null);
+    const brightnessReadout = await popup.eval(
+      `document.getElementById('protected-brightness-value').textContent`,
+    );
+    check(
+      'the protected-video brightness slider persists its own setting and reads as a percentage',
+      Boolean(brightnessStored) && brightnessReadout === '50%' && brightnessStored.videoStrength === 45,
+      `stored ${brightnessStored?.protectedBrightness}, readout "${brightnessReadout}"`,
+    );
+    await writeSettings({ strength: 70 });
+    await sleep(400);
+
+    // Chrome caps a popup at 600 px; the live row and the chips are new
+    // front-of-popup rows and have to fit inside it in the tallest state.
+    const budget = JSON.parse(
+      await popup.eval(`(() => {
+        const more = document.getElementById('more');
+        const wasOpen = more.open;
+        more.open = false;
+        const live = document.getElementById('live-row');
+        const wasHidden = live.hidden;
+        live.hidden = false;
+        const site = document.getElementById('site-toggle');
+        const siteHidden = site.hidden;
+        site.hidden = false;
+        const height = document.body.scrollHeight;
+        site.hidden = siteHidden;
+        live.hidden = wasHidden;
+        more.open = wasOpen;
+        return JSON.stringify({ height, width: document.documentElement.getBoundingClientRect().width });
+      })()`),
+    );
+    check(
+      'the popup still opens inside Chrome’s 600 px cap with the live row and the chips showing',
+      budget.height <= 600 && budget.width <= 340,
+      `${budget.width} x ${budget.height} CSS px with More options closed`,
+    );
+
+    /* -------- the popup over a protected player -------- */
+    // The tab in front of the user is now the cross-origin one. The sentence,
+    // the picture card and the graph caption all have to describe *that*
+    // player: sound handed back, picture on the fixed curve at the set
+    // brightness — not the adaptive figures the measured tab gets.
+    await browser.send('Target.activateTarget', { targetId: crossTab.id }).catch(() => {});
+    const crossSummary = await waitFor('cross-origin summary', async () => {
+      const state = JSON.parse(
+        await popup.eval(`JSON.stringify({
+          text: document.getElementById('summary-text').textContent,
+          dot: document.getElementById('summary-dot').dataset.state,
+          desc: document.getElementById('picture-desc').textContent,
+          reading: [1, 2, 3].map((n) => document.getElementById('video-reading-' + n)).filter((el) => !el.hidden).map((el) => el.textContent),
+          meter: document.getElementById('meter').textContent,
+          liveShown: !document.getElementById('live-row').hidden,
+        })`),
+      );
+      return /^Picture only/.test(state.text) ? state : false;
+    }).catch(() => null);
+    check(
+      'over a cross-origin player the summary says the sound cannot be processed',
+      crossSummary?.text === "Picture only — this player's sound can't be processed" &&
+        crossSummary?.dot === 'partial',
+      crossSummary ? `"${crossSummary.text}" (${crossSummary.dot})` : 'summary never changed',
+    );
+    const staticCaption = JSON.parse(await page.eval(`JSON.stringify(NNCore.describeStaticVideoEffect(70, 75))`));
+    const adaptiveCaption = JSON.parse(await page.eval(`JSON.stringify(NNCore.describeVideoEffect(70))`));
+    check(
+      'and the picture card and caption describe the fixed curve, not the adaptive one',
+      crossSummary?.desc === 'Protected player: fixed curve at 75% brightness' &&
+        crossSummary?.reading.join('|') === `${staticCaption.join('|')}|Fixed curve on this player` &&
+        staticCaption.join('|') !== adaptiveCaption.join('|'),
+      crossSummary ? `"${crossSummary.desc}"; ${crossSummary.reading.join(' / ')}` : '',
+    );
+    check(
+      'the meter over a protected player shows the picture half only',
+      crossSummary?.liveShown === true && /^−\d+% light now$/.test(crossSummary?.meter ?? ''),
+      `"${crossSummary?.meter}"`,
+    );
+
+    // A fresh load of that player, before its first play, is waiting — not
+    // "nothing to soften", which is what it used to say.
+    await cross.send('Page.reload').catch(() => {});
+    const waiting = await waitFor('waiting summary', async () => {
+      const state = JSON.parse(
+        await popup.eval(`JSON.stringify({
+          text: document.getElementById('summary-text').textContent,
+          dot: document.getElementById('summary-dot').dataset.state,
+        })`),
+      );
+      return state.text === 'Waiting for playback' ? state : false;
+    }).catch(() => null);
+    check(
+      'a player that has not been started reads as waiting for playback',
+      waiting?.text === 'Waiting for playback' && waiting?.dot === 'idle',
+      waiting ? `"${waiting.text}" (${waiting.dot})` : 'never said so',
+    );
+    await browser.send('Target.activateTarget', { targetId: tab.id }).catch(() => {});
+
     /* -------- console hygiene -------- */
     const pageErrors = page.consoleErrors.filter((line) => !/favicon|net::ERR/i.test(line));
     check(
@@ -2267,9 +3012,46 @@ async function main() {
       popup.consoleErrors.length === 0,
       popup.consoleErrors.slice(0, 3).join(' | '),
     );
+    check(
+      'no console errors on the cross-origin page',
+      cross.consoleErrors.filter((line) => !/favicon|net::ERR/i.test(line)).length === 0,
+      cross.consoleErrors.slice(0, 3).join(' | '),
+    );
+
+    /* -------- a held Compare cannot outlive the popup -------- */
+    // The port is what makes this safe: the content script treats the popup
+    // going away as the button coming up, so a Compare that was still held
+    // when the popup closed cannot leave the tab unprocessed with nothing on
+    // screen to say why.
+    await waitFor('popup back on the bench tab', async () => {
+      const text = await popup.eval(`document.getElementById('meter').textContent`);
+      return /dB now/.test(text) ? text : false;
+    }).catch(() => null);
+    await popup.send('Input.dispatchMouseEvent', { type: 'mouseMoved', ...compareBox });
+    await popup.send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      ...compareBox,
+      button: 'left',
+      clickCount: 1,
+    });
+    const heldAgain = await waitFor('compare held again', async () => {
+      const rules = await pageRules();
+      return !rules.video.includes('url(');
+    }).catch(() => false);
+    popup.close();
+    await closeTab(popupTab.id);
+    const releasedByClosing = await waitFor('curve back after the popup closed', async () => {
+      const rules = await pageRules();
+      return rules.video.includes('url(') && rules.image.includes('url(');
+    }).catch(() => false);
+    check(
+      'closing the popup mid-hold releases the comparison',
+      heldAgain === true && releasedByClosing === true,
+      heldAgain ? `curve back within a second of the popup closing=${releasedByClosing}` : 'could not hold',
+    );
 
     page.close();
-    popup.close();
+    cross.close();
     sw.close();
     browser.close();
   } finally {

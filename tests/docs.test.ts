@@ -51,6 +51,7 @@ describe('the privacy policy describes what is actually stored', () => {
     enabled: /whether the extension is on/i,
     audioStrength: /strength values for audio and video/i,
     videoStrength: /strength values for audio and video/i,
+    protectedBrightness: /brightness on protected video/i,
     audio: /audio processing/i,
     video: /video processing/i,
     images: /still-image processing/i,

@@ -94,6 +94,25 @@ describe('aggregateStatuses', () => {
     ).toBe('static');
   });
 
+  it('ranks a frame that is only waiting for playback above off and below everything else', () => {
+    // `idle` is the ordinary state of every player before the first click, so
+    // it outranks nothing that is actually saying something — but it does
+    // outrank `off`, or a paused player would read as a switch nobody turned on.
+    const video = (mode: FrameStatus['video']['mode']): Partial<FrameStatus> => ({
+      video: { mode, elements: mode === 'off' ? 0 : 1, technique: 'svg-tone-curve' },
+    });
+    expect(aggregateStatuses([frame(video('off')), frame(video('idle'))]).video.mode).toBe('idle');
+    expect(aggregateStatuses([frame(video('idle')), frame(video('unsupported'))]).video.mode).toBe(
+      'unsupported',
+    );
+    expect(aggregateStatuses([frame(video('idle')), frame(video('static'))]).video.mode).toBe(
+      'static',
+    );
+    expect(aggregateStatuses([frame(video('adaptive')), frame(video('idle'))]).video.mode).toBe(
+      'adaptive',
+    );
+  });
+
   it('has no site when nothing was reported', () => {
     const status = aggregateStatuses([]);
     expect(status.site).toBe('');

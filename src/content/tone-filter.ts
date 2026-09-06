@@ -51,6 +51,8 @@ export class ToneFilter {
   private styleNode: HTMLStyleElement | null = null;
   private technique: ToneTechnique = 'none';
   private extraFilters = '';
+  /** True while Compare is held: the rule carries everything but the curve. */
+  private bypassed = false;
   private lastTable = '';
   private lastSaturation = -1;
   private lastRule = '';
@@ -175,8 +177,24 @@ export class ToneFilter {
 
   private writeRule(): void {
     if (!this.styleNode) return;
-    const base =
-      this.technique === 'svg-tone-curve' ? this.filterReference() : this.fallbackCss;
+    // While bypassed the curve comes off and everything else stays: the page
+    // treatment's counter-inversion still has a root inversion to cancel, so
+    // dropping the whole rule during a Compare would show every photograph and
+    // frame as a negative. With nothing else to carry, the rule goes entirely
+    // rather than being written as `filter:none !important`, which would
+    // override a filter the site itself had put on its media.
+    const base = this.bypassed
+      ? 'none'
+      : this.technique === 'svg-tone-curve'
+        ? this.filterReference()
+        : this.fallbackCss;
+    if (base === 'none' && !this.extraFilters) {
+      if (this.lastRule !== '') {
+        this.lastRule = '';
+        this.styleNode.textContent = '';
+      }
+      return;
+    }
     // `filter` is one property, so a rule elsewhere cannot add to this one — it
     // can only replace it. Anything the page treatment needs applied to the same
     // elements therefore has to be appended here. See `PAGE_MEDIA_SELECTOR`.
@@ -215,6 +233,23 @@ export class ToneFilter {
     if (this.extraFilters === next) return;
     this.extraFilters = next;
     this.writeRule();
+  }
+
+  /**
+   * Take the curve off the elements — and put it straight back — without
+   * touching the filter definition, the marks, or the state behind it. This is
+   * what a held Compare does: the engines keep measuring and keep writing the
+   * table while it is held, so release restores the *current* curve rather
+   * than the one from the moment the button went down.
+   */
+  setBypass(bypassed: boolean): void {
+    if (this.bypassed === bypassed) return;
+    this.bypassed = bypassed;
+    this.writeRule();
+  }
+
+  isBypassed(): boolean {
+    return this.bypassed;
   }
 
   /** Push a new lookup table (values in 0..1, monotonic). */
@@ -295,6 +330,9 @@ export class ToneFilter {
     this.lastSaturation = -1;
     this.lastRule = '';
     this.lastHref = '';
+    // A bypass is a property of a held button, not of this instance: switching
+    // the engine off and on again must not come back with the curve missing.
+    this.bypassed = false;
   }
 
   destroy(): void {

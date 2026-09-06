@@ -6,7 +6,13 @@
  * is constructed around narrow interfaces so tests can supply a fake area
  * instead of a Chrome global.
  */
-import { DEFAULT_SETTINGS, SETTINGS_KEY, type Settings } from './types';
+import {
+  DEFAULT_SETTINGS,
+  MAX_PROTECTED_BRIGHTNESS,
+  MIN_PROTECTED_BRIGHTNESS,
+  SETTINGS_KEY,
+  type Settings,
+} from './types';
 import { clamp } from './math';
 import { sanitizeDisabledSites } from './site';
 import { sanitizeClock } from './schedule';
@@ -81,6 +87,7 @@ export function sanitizeSettings(raw: unknown): Settings {
       source.videoStrength,
       level(legacy.strength, DEFAULT_SETTINGS.videoStrength),
     ),
+    protectedBrightness: sanitizeProtectedBrightness(source.protectedBrightness),
     // Was `pageDark` while it had a `pageColor` sibling to be told apart from.
     // Defaults to false either way, so an install that predates it simply
     // carries on as it was.
@@ -94,6 +101,17 @@ export function sanitizeSettings(raw: unknown): Settings {
   };
 }
 
+/**
+ * The protected-video brightness, clamped to its own range rather than to the
+ * slider's 0..100: a stored 0 would be a black screen, and a value below the
+ * floor is far more likely to be garbage than a wish.
+ */
+export function sanitizeProtectedBrightness(value: unknown): number {
+  const numeric = typeof value === 'number' ? value : Number.NaN;
+  if (!Number.isFinite(numeric)) return DEFAULT_SETTINGS.protectedBrightness;
+  return Math.round(clamp(numeric, MIN_PROTECTED_BRIGHTNESS, MAX_PROTECTED_BRIGHTNESS));
+}
+
 export function settingsEqual(a: Settings, b: Settings): boolean {
   return (
     a.enabled === b.enabled &&
@@ -104,6 +122,7 @@ export function settingsEqual(a: Settings, b: Settings): boolean {
     a.video === b.video &&
     a.images === b.images &&
     a.videoStrength === b.videoStrength &&
+    a.protectedBrightness === b.protectedBrightness &&
     a.darkMode === b.darkMode &&
     a.nightOnly === b.nightOnly &&
     a.nightStart === b.nightStart &&

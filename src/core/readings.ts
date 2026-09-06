@@ -11,8 +11,9 @@
  * functions the engines use, and they have to be testable. A caption that is
  * merely plausible is worse than no caption.
  */
-import { adaptBounds, buildToneCurve } from './tone-curve';
+import { adaptBounds, buildToneCurve, staticAdaptState } from './tone-curve';
 import { audioTransferDb, mapAudioStrength, mapVideoStrength } from './strength';
+import { DEFAULT_SETTINGS } from './types';
 
 /** Input level treated as "a whispered line". */
 export const QUIET_DB = -45;
@@ -77,6 +78,31 @@ export function videoEffect(strength: number): VideoEffect {
   };
 }
 
+/**
+ * The same two figures for the fixed curve a protected player gets.
+ *
+ * A separate reading rather than a flag on `videoEffect`, because the two are
+ * claims about different curves: the adaptive one moves between its bounds as
+ * scenes change, the fixed one is one curve for every scene and takes its
+ * exposure from a setting instead of a measurement. The popup quotes this one
+ * whenever the tab in front of the user reports `static`, so the caption
+ * describes the player they are watching rather than the one they are not.
+ */
+export function staticVideoEffect(
+  strength: number,
+  protectedBrightness: number = DEFAULT_SETTINGS.protectedBrightness,
+): VideoEffect {
+  const params = mapVideoStrength(strength, protectedBrightness);
+  if (params.bypass) return { bypass: true, shadowGain: 1, whiteDrop: 0 };
+
+  const curve = buildToneCurve(params, staticAdaptState(params), 65);
+  return {
+    bypass: false,
+    shadowGain: sampleCurve(curve, SHADOW_INPUT) / SHADOW_INPUT,
+    whiteDrop: 1 - sampleCurve(curve, 1),
+  };
+}
+
 export function audioEffect(strength: number, nightEq = false): AudioEffect {
   const params = mapAudioStrength(strength, nightEq);
   if (params.bypass) return { bypass: true, liftDb: 0, narrowingDb: 0 };
@@ -101,7 +127,22 @@ export function audioEffect(strength: number, nightEq = false): AudioEffect {
  * optimistic against a rendered measurement.
  */
 export function describeVideoEffect(strength: number): [string, string] {
-  const effect = videoEffect(strength);
+  return captionVideoEffect(videoEffect(strength));
+}
+
+/**
+ * The caption for a protected player: same wording, computed from the fixed
+ * curve, so "Whites 28% softer" is not shown over a video whose whites are
+ * being softened by some other amount.
+ */
+export function describeStaticVideoEffect(
+  strength: number,
+  protectedBrightness: number = DEFAULT_SETTINGS.protectedBrightness,
+): [string, string] {
+  return captionVideoEffect(staticVideoEffect(strength, protectedBrightness));
+}
+
+function captionVideoEffect(effect: VideoEffect): [string, string] {
   if (effect.bypass) return ['Picture untouched', ''];
 
   const drop = Math.floor(effect.whiteDrop * 100);

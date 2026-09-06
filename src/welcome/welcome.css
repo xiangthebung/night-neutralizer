@@ -1,0 +1,366 @@
+/*
+ * The popup's palette and type, at page size. Same navy, same gold, same moon:
+ * the page a user lands on right after installing has to look like the thing
+ * they are about to open from the toolbar.
+ */
+:root {
+  color-scheme: dark;
+  --bg: #0a0e15;
+  --panel: #111725;
+  --panel-2: #161d2d;
+  --line: #1f2839;
+  --text: #d8dfec;
+  --text-dim: #8994a8;
+  --accent: #e8bd7c;
+  --accent-dim: #3a3020;
+  --good: #7fc9a0;
+  --focus: #8fb4ff;
+  --radius: 12px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 40px 24px 56px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+p {
+  margin: 0;
+}
+
+.sub {
+  max-width: 68ch;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+/* ---------- hero ---------- */
+
+.hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+}
+
+.lede {
+  margin-top: 8px;
+  max-width: 62ch;
+  color: var(--text-dim);
+}
+
+.moon {
+  position: relative;
+  flex: none;
+  margin-top: 6px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #f6dfae, #d9a95f);
+  box-shadow: 0 0 26px rgba(232, 189, 124, 0.3);
+}
+
+.moon::after {
+  content: "";
+  position: absolute;
+  inset: -6px -17px 4px 17px;
+  border-radius: 50%;
+  background: var(--bg);
+}
+
+/* ---------- sections ---------- */
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ---------- the demo ---------- */
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+figure {
+  margin: 0;
+  min-width: 0;
+}
+
+canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+/* The real effect: the same SVG filter technique the content script uses,
+   with a table the page rewrites on every measured frame. */
+.treated {
+  filter: url("#nn-welcome-curve");
+}
+
+.defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.live {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.scene-line {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- sound ---------- */
+
+.sound-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.play {
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.play:hover {
+  border-color: #33405a;
+}
+
+.play.accent {
+  color: #1a1408;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.play.accent:hover {
+  background: #f0cc90;
+}
+
+.play:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.play:focus-visible,
+.chip:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.level {
+  flex: 1 1 160px;
+  height: 8px;
+  border-radius: 999px;
+  background: #202939;
+  overflow: hidden;
+}
+
+.level-fill {
+  display: block;
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  transition: width 60ms linear;
+}
+
+.level-text {
+  min-width: 5.5em;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.sound-line {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  min-height: 1.4em;
+}
+
+/* ---------- presets ---------- */
+
+.chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  padding: 7px 18px;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--text);
+  border-color: #33405a;
+}
+
+.chip[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-color: #6a5836;
+}
+
+.preset-line {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- try it now ---------- */
+
+.try-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.try-note {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.try[data-state="running"] .try-note {
+  color: var(--good);
+}
+
+/* ---------- the list ---------- */
+
+.how ul {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+.how strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.how em {
+  font-style: normal;
+  color: var(--accent);
+}
+
+.foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 4px;
+  font-size: 12px;
+  color: #4d5871;
+}
+
+kbd {
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}

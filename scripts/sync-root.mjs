@@ -24,7 +24,15 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = path.join(root, 'dist');
 
-const REQUIRED = ['manifest.json', 'popup.html', 'popup.js', 'service-worker.js', 'content.js'];
+const REQUIRED = [
+  'manifest.json',
+  'popup.html',
+  'popup.js',
+  'service-worker.js',
+  'content.js',
+  'welcome.html',
+  'welcome.js',
+];
 const GENERATED = [
   'manifest.json',
   'content.js',
@@ -32,6 +40,9 @@ const GENERATED = [
   'popup.html',
   'popup.css',
   'popup.js',
+  'welcome.html',
+  'welcome.css',
+  'welcome.js',
   'icons',
 ];
 

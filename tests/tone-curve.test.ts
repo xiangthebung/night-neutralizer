@@ -1308,12 +1308,54 @@ describe('staticAdaptState', () => {
 
   it('produces a fixed, non-adaptive curve', () => {
     const state = staticAdaptState(maxParams);
-    expect(state.exposure).toBe(1);
+    // The exposure is the setting's, not the servo's: `exposure: 1` used to be
+    // pinned here, and that was the glare protection a protected player never
+    // got. See "stands in for the exposure servo" below.
+    expect(state.exposure).toBe(maxParams.adapt.staticExposure);
     expect(state.flash).toBe(0);
     expect(state.liftScale).toBeCloseTo(maxParams.adapt.staticLiftScale, 6);
+    // Its target is itself, so advancing it cannot drift towards the identity.
+    expect(state.targets.exposure).toBe(state.exposure);
     const a = buildToneCurve(maxParams, state);
     const b = buildToneCurve(maxParams, staticAdaptState(maxParams));
     expect(a).toEqual(b);
+  });
+
+  it('stands in for the exposure servo with the protected-video brightness', () => {
+    // On a player whose frames cannot be read the servo never runs, and with
+    // the exposure left at 1 the fixed curve at the default strength left white
+    // at 0.92 — against 0.71 on a measured bright scene. The setting is the
+    // whole of the glare protection such a player gets, so at the shipped
+    // default it has to dim white clearly, and it must not crush the shadows
+    // the lift exists to open.
+    const untouched = buildToneCurve(mapVideoStrength(45, 100), staticAdaptState(mapVideoStrength(45, 100)));
+    const shipped = buildToneCurve(mapVideoStrength(45), staticAdaptState(mapVideoStrength(45)));
+    const white = (curve: number[]): number => curve[curve.length - 1] as number;
+    expect(white(untouched)).toBeGreaterThan(0.9);
+    expect(white(shipped)).toBeLessThan(white(untouched) - 0.15);
+    expect(white(shipped)).toBeGreaterThan(0.6);
+    // Shadows are still opened — close to double — at the shipped default:
+    // the dimming is paid above the knee, not out of the lift.
+    expect(shipped[2] as number).toBeGreaterThan((2 / 32) * 1.8);
+    expect(shipped[0] as number).toBeGreaterThan(0.01);
+    // Monotonic in the setting: less brightness, less light, at every level.
+    let previous = untouched;
+    for (const brightness of [90, 75, 60, 40, 25]) {
+      const params = mapVideoStrength(45, brightness);
+      const curve = buildToneCurve(params, staticAdaptState(params));
+      for (let i = 1; i < curve.length; i++) {
+        expect(curve[i] as number).toBeLessThanOrEqual((previous[i] as number) + 1e-9);
+      }
+      previous = curve;
+    }
+  });
+
+  it('clamps the exposure so a hand-edited setting cannot black the screen out', () => {
+    const params = mapVideoStrength(45);
+    const dark = { ...params, adapt: { ...params.adapt, staticExposure: 0 } };
+    expect(staticAdaptState(dark).exposure).toBe(0.2);
+    const over = { ...params, adapt: { ...params.adapt, staticExposure: 4 } };
+    expect(staticAdaptState(over).exposure).toBe(1);
   });
 
   it('still lifts shadows and rolls off highlights', () => {

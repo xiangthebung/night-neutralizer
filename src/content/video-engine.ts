@@ -37,6 +37,7 @@ import {
   type AdaptState,
   type SceneStats,
 } from '../core/tone-curve';
+import { lightRatio } from '../core/meter';
 import { debug } from '../core/log';
 import { ToneFilter, type ToneTechnique } from './tone-filter';
 
@@ -133,6 +134,13 @@ export interface VideoEngineStatus {
   notes: string[];
 }
 
+/** What the curve on the filter is doing to the frame on screen, right now. */
+export interface VideoMeter {
+  mode: VideoMode;
+  /** See `LiveMeterMessage.video.lightRatio`. */
+  lightRatio: number | null;
+}
+
 export class VideoEngine {
   private readonly doc: Document;
   private readonly filter: ToneFilter;
@@ -148,6 +156,10 @@ export class VideoEngine {
   private sampleCostMs = 0;
   private notes = new Set<string>();
   private destroyed = false;
+  /** The curve last handed to the filter, for the meter. */
+  private lastCurve: number[] | null = null;
+  /** True while the popup's Compare is held. */
+  private held = false;
 
   /** Frame-callback state: measurement runs on the video's own cadence. */
   private frameVideo: FrameCallbackVideo | null = null;
@@ -203,19 +215,56 @@ export class VideoEngine {
       // Leave nothing behind while switched off: no stylesheet, no filter node.
       this.filter.teardown();
       this.mode = 'off';
+      this.lastCurve = null;
       this.notes.clear();
       this.onStatusChange();
       return;
     }
 
-    if (!wasActive) this.state = createAdaptState();
+    if (!wasActive) {
+      this.state = createAdaptState();
+      // Installed and waiting. Not `off`: the switch is on and the filter is in
+      // place, there just has not been a frame to measure yet, and the popup
+      // has to be able to say "waiting for playback" rather than "video off"
+      // over a paused player.
+      this.mode = 'idle';
+    }
 
     this.filter.ensure();
+    // A settings change while Compare is held must not put the curve back
+    // early; the hold outranks it until the button comes up.
+    this.filter.setBypass(this.held);
     for (const video of this.videos.keys()) this.filter.markVideo(video);
     this.pushCurve(true);
     this.startLoop(UPKEEP_INTERVAL_MS);
     this.tick();
     this.onStatusChange();
+  }
+
+  /**
+   * Compare: take the curve off while the popup's button is held. Everything
+   * else keeps running — the frame callback, the adaptation, the table writes
+   * — so that letting go restores the curve the scene needs *now*, not the one
+   * it needed when the button went down.
+   */
+  setHold(held: boolean): void {
+    if (this.destroyed || this.held === held) return;
+    this.held = held;
+    if (this.enabled) this.filter.setBypass(held);
+  }
+
+  /**
+   * The meter: how much light the curve on the filter is adding to or taking
+   * from the frame on screen. Weighted by the last measured histogram, so it
+   * reads the scene rather than the curve in the abstract; a protected player
+   * has no histogram and gets the curve's effect on a full ramp instead.
+   */
+  getMeter(): VideoMeter {
+    const mode = this.getStatus().mode;
+    if (!this.enabled || !this.lastCurve || mode === 'off' || mode === 'idle') {
+      return { mode, lightRatio: null };
+    }
+    return { mode, lightRatio: lightRatio(this.lastCurve, this.state.histogram) };
   }
 
   /**
@@ -295,7 +344,7 @@ export class VideoEngine {
       // Nothing is being painted; skip the read-back entirely. If we never got
       // to measure anything, fall back to the fixed curve so a video that
       // becomes visible is already treated (and report that honestly).
-      if (this.mode === 'off') this.applyStatic();
+      if (this.mode === 'off' || this.mode === 'idle') this.applyStatic();
       return;
     }
 
@@ -465,6 +514,7 @@ export class VideoEngine {
     this.lastPushAt = at;
 
     const curve = buildToneCurve(this.params, this.state);
+    this.lastCurve = curve;
     // Saturation compensation follows the lift, so it disengages together with
     // the rest of the curve on scenes that need no correction.
     const saturation = this.params.bypass ? 1 : resolveCurve(this.params, this.state).saturation;

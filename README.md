@@ -26,6 +26,12 @@ and without being ambushed by a bright cut or an explosion.
 - **Grouped and per-site:** sound and picture are separate panels with separate
   strength sliders, so "squash the soundtrack, leave the picture alone" is one
   drag; plus a one-click "skip this site".
+- **Says what it is doing, and proves it:** one sentence per tab, a live meter
+  of the gain and the light change at this instant, a press-and-hold *Compare*,
+  and three presets — *Dialogue*, *Bedtime*, *Balanced*.
+- **Protected players are dimmed too.** Netflix, Prime Video and Disney+ cannot
+  be measured, so their fixed curve takes its brightness from a setting, 75% by
+  default, instead of never dimming at all.
 - **Local only:** one permission (`storage`), no network access, no accounts,
   no telemetry, no remote code.
 
@@ -119,9 +125,26 @@ twice a year should not be competing with the slider you came in for.
 
 - **On/off** — master switch, top right. Off means nothing is processed anywhere.
 - **The line under it** says what is happening on this tab in one sentence:
-  *Softening the sound and picture*, *Waiting for 09:00 PM*, *Left alone on
-  youtube.com*, *Paused*. The per-path detail behind it is in More options,
-  because it only earns its space when the answer is surprising.
+  *Softening the sound and picture*, *Waiting for playback* (a player that has
+  not started yet), *Picture only — this player's sound can't be processed*,
+  *Softening the sound and picture · protected video*, *Waiting for 09:00 PM*,
+  *Left alone on youtube.com*, *Paused*. The per-path detail behind it is in
+  More options, because it only earns its space when the answer is surprising.
+- **The meter, and Hold to compare.** Under the sentence, while the tab has a
+  player running: `+9 dB now · −31% light now` is what is being applied at this
+  instant — the net gain on the sound, and the change in the light the frame on
+  screen gives off — fed by the tab several times a second, so it moves when the
+  film does. Beside it, **Hold to compare** shows the site's own sound and
+  picture for exactly as long as the button is held; the button reads
+  *Comparing…* and the meter *Original sound and picture* meanwhile. Both ride a
+  `chrome.tabs.connect` port to the tab rather than a setting, which is what
+  lets a comparison end the moment the popup closes.
+- **Presets** — *Dialogue*, *Bedtime*, *Balanced*. Each chip writes a few
+  settings and the line under the chips says exactly which: Dialogue is sound 70
+  with night EQ and the picture left as it is, Bedtime is both at 70 with night
+  EQ and dark mode on, Balanced is the shipped defaults. The chip that matches
+  the current settings is lit, and none is once a slider has been dragged off
+  it.
 - **Sound** — its own switch, and a strength slider from 0 to 100. Higher
   strength means stronger correction *where the material needs it*: quiet gets
   louder and loud gets quieter. Lower strength keeps more of the original punch.
@@ -184,6 +207,13 @@ The disclosure remembers whether you left it open.
   corrected for what it contains, while a still cannot be measured at all and
   gets one fixed curve that only ever darkens — see
   [Still images](#still-images).
+- **Brightness on protected video** — 25 to 100%, default 75. Netflix, Prime
+  Video and Disney+ cannot be measured, so the scene-by-scene dimming the graph
+  above shows never runs there; the fixed curve those players get takes its
+  exposure from this setting instead. While the current tab is on such a player
+  the picture card reads *Protected player: fixed curve at 75% brightness*, and
+  the graph and its caption are computed from that curve rather than the
+  adaptive one — see [Limitations](#limitations-read-this).
 - **Dark mode** — the page *around* the media, and **off by default**.
   Everything else here treats content and tries not to change what the author
   intended; this changes how a site looks on purpose, so it has to be asked for.
@@ -196,10 +226,11 @@ The disclosure remembers whether you left it open.
 *This tab*
 
 - **The two status lines** behind the one-sentence summary: one for sound (how
-  many players are being compressed) and one for the picture, which reports both
-  halves at once — whether video is running *adaptive tone mapping* (frames are
-  being measured) or a *fixed night curve* (frames cannot be read, e.g. DRM), and
-  how many stills the image curve is on.
+  many players are being compressed, or that this player's sound can't be
+  processed) and one for the picture, which reports both halves at once —
+  whether video is running *adaptive tone mapping* (frames are being measured),
+  a *fixed curve, protected video* (frames cannot be read, e.g. DRM) or is
+  *waiting for playback*, and how many stills the image curve is on.
 - **Skip *hostname*** — leaves that site completely alone, audio and video.
   Useful for a site that already tone-maps its own video, a work tool you never
   watch at night, or anything that misbehaves. Listing a domain also covers its
@@ -219,10 +250,19 @@ The disclosure remembers whether you left it open.
 Changes apply immediately to open tabs; no reload. Settings live in
 `chrome.storage.sync`, so they follow your Chrome profile.
 
+**The first run.** Installing opens a welcome page — once, never on an update —
+because the shipped default is *Only at night*, and an install at three in the
+afternoon would otherwise do nothing until nine. The page runs the real tone
+curve on a scene it draws itself, plays a whispered line and a burst through the
+real audio chain, offers the three presets, and has a **Try it now** button that
+switches *Only at night* off until Chrome next starts. The popup says *Off for a
+look; the hours come back when Chrome restarts* meanwhile, and touching the
+switch yourself ends the trial.
+
 **Keyboard shortcut:** `Alt+Shift+N` toggles the extension on and off without
 opening the popup — handy when a scene is already too bright and you just want it
 gone. Remap it at `chrome://extensions/shortcuts`; the popup shows whatever it is
-currently bound to, and shows nothing if you have unbound it.
+currently bound to, and *No shortcut set · Change* if you have unbound it.
 
 **The toolbar icon reports state**, because the shortcut has no other feedback:
 on a tab with no video, or with video processing already off, pressing it would
@@ -277,6 +317,13 @@ Design notes:
   every content script reacts to `chrome.storage.onChanged`. That is why applying
   a change needs no tab permissions and no page reload. The ambient light reading
   travels the same way, through `chrome.storage.session`.
+- **Two things do not go through storage.** The popup's live meter and its
+  *Hold to compare* button ride a `chrome.tabs.connect` port to the tab's content
+  scripts (`core/messages.ts`): one has to move several times a second, which
+  the once-a-second status channel cannot do, and the other has to stop the
+  instant the popup closes, which a setting cannot do — the content script treats
+  the port disconnecting as the button coming up. `tabs.connect` reaches only
+  this extension's own content scripts and needs no permission.
 - **One gate, one reason.** `core/gate.ts` is the only place that decides whether
   a frame processes anything, and it returns *why* along with the answer. The
   engines, the popup's status lines and the toolbar badge all display what it
@@ -361,6 +408,11 @@ Details that matter in practice:
 - **Times are local wall-clock time**, stored as minutes since midnight. The popup
   renders them in your locale's convention, so the caption and the clock fields
   agree.
+- **"Try it now" is a trial, not a decision.** The welcome page can switch
+  *Only at night* off for a look; a flag in `chrome.storage.local` records that
+  it was switched off for that reason, and the service worker's `onStartup` puts
+  the restriction back at the next browser start. Changing the switch by hand
+  clears the flag, so a restart never overrules you.
 
 ---
 
@@ -493,12 +545,21 @@ Choices worth explaining:
   created only after `resume()` succeeds. Under autoplay restrictions the
   extension waits for the first user gesture and leaves playback untouched
   meanwhile.
-- **Cross-origin safety net.** Media served cross-origin without CORS produces a
-  *silent* Web Audio graph. Such elements are classified as risky
-  (`core/media-origin.ts`) and verified with a 2.5 s silence probe on an
-  `AnalyserNode` tap; if nothing comes through, the context is closed, which hands
-  playback straight back to the element. MSE/blob sources (YouTube, Vimeo) and
-  same-origin or `crossorigin`-attributed media skip the probe entirely.
+- **Cross-origin media is refused up front, not probed.** A
+  `MediaElementAudioSourceNode` on CORS-cross-origin media outputs silence, by
+  specification, and a plain cross-origin `src` with no `crossorigin` attribute
+  is always CORS-cross-origin. Such elements are classified as risky
+  (`core/media-origin.ts`) and are not routed through a graph at all: they play
+  natively from their first sample and the popup says *Picture only — this
+  player's sound can't be processed*. They used to be routed and then verified
+  with a 2.5 s silence probe on an `AnalyserNode` tap that rolled the graph
+  back — two and a half seconds of silence at the start of every such player,
+  and a probe a genuinely quiet intro could fool. The smoke run's cross-origin
+  case measures the sound being reported as handed back within 1.5 s of play
+  (tens of milliseconds in practice), against 2.7 s before. The verdict is
+  withdrawn if the element later moves to a source that can be processed, such
+  as MSE or its own host. MSE/blob sources (YouTube, Vimeo) and same-origin or
+  `crossorigin`-attributed media are processed as before.
 
 ---
 
@@ -1086,7 +1147,14 @@ Consequences:
 
 - Audio compression works normally on these sites (the audio graph does not need
   frame access).
-- Video gets the **static** night curve, not scene-adaptive tone mapping.
+- Video gets the **static** night curve, not scene-adaptive tone mapping — at
+  the brightness set by *Brightness on protected video* in More options, 75% of
+  the original by default. That setting is the whole of the glare protection a
+  protected player gets: with the exposure left at 1 the fixed curve left white
+  at 0.92 at the default strength, against 0.71 on a measured bright scene. The
+  popup's picture card, graph and captions describe that fixed curve while you
+  are on such a player, and the summary names it: *Softening the sound and
+  picture · protected video*.
 - On desktop Chrome (software/L3 decryption) the CSS filter is applied by the
   compositor and you will see the effect. If your system uses a **protected
   hardware video overlay** (some Windows and ChromeOS configurations with L1
@@ -1097,8 +1165,9 @@ Consequences:
 
 - **Picture-in-Picture** and casting (Chromecast/AirPlay) render on a separate
   surface: no filter.
-- **Cross-origin audio without CORS** cannot be processed. The extension detects
-  it, restores native playback, and says so in the popup.
+- **Cross-origin audio without CORS** cannot be processed. The extension knows
+  that from the source alone, never routes it, and says so in the popup:
+  *Picture only — this player's sound can't be processed*.
 - **Muted autoplay** video gets audio processing only after your first click or
   key press on the page (browser autoplay policy).
 - **Native `<track>` captions** are drawn inside the video by the browser, so
@@ -1124,8 +1193,8 @@ Consequences:
   `chrome://extensions` does not change that — that toggle grants a permission to
   extensions whose match patterns already include `file:///*`, and this one's do
   not. This entry used to claim the opposite.
-- **A hidden/background tab** shows `fixed night curve` until it becomes visible
-  again, because analysis is paused to save CPU.
+- **A hidden/background tab** is put on the fixed curve (reported as `static`)
+  until it becomes visible again, because analysis is paused to save CPU.
 - **The flash guard is reactive, not predictive.** It dims the frames *after* the
   one that triggered it (~16 ms at 60 fps). A single-frame flash is therefore
   shortened, not removed. Frame lookahead is not available to an extension.
@@ -1288,7 +1357,7 @@ Chrome will then only inject the content script on those sites.
 
 ## Testing
 
-Unit tests (`npm test`, 493 tests) cover the strength → parameter mapping
+Unit tests (`npm test`, 560 tests) cover the strength → parameter mapping
 (including the night EQ and the transfer model the popup plots), tone-curve maths
 and adaptation behaviour (including sampling-rate-independent flash and
 scene-change detection), the frame-skip control law, the safety clipper, media
@@ -1300,14 +1369,23 @@ heuristics, the gate's order of precedence, status aggregation, the popup's
 plain-language captions
 (that they agree with the real curves, never overstate the effect, and stay short
 enough not to wrap), the SVG filter's DOM handling under jsdom (including the
-`<base href>` workaround and fullscreen re-parenting), and the status reporter's
-throttling.
+`<base href>` workaround and fullscreen re-parenting), the status reporter's
+throttling, the live meter's two figures and its wording, the three presets, and
+the night trial.
 
 Four of those suites exist because the code they cover cannot be seen from a
 browser. `video-engine-static.test.ts` drives the path taken when frames cannot
 be read at all — every protected stream, and every cross-origin video served
 without CORS — and asserts the three things that go wrong quietly there: it
 does not throw, it does not keep asking, and it still applies a curve.
+
+`audio-engine.test.ts` runs the audio engine against a fake Web Audio, for the
+three things a browser will not show on demand: a cross-origin player refused at
+once and without spending a context, *Compare* running the graph transparent for
+exactly as long as it is held, and the meter reading the gain off the compressor
+rather than off the settings. `video-engine-live.test.ts` is its counterpart for
+the picture: `idle` before the first frame, and a *Compare* that takes the curve
+off the rule — and only the curve — while the engine keeps measuring underneath.
 
 `light-sensor.test.ts` covers the sensor's *absence*, which is what a stock
 Chrome install has, and follows it through to a gate decision, so the clock
@@ -1335,14 +1413,20 @@ inverted, that a light one is, that the verdict does not oscillate when
 re-measured under the other colour scheme, that it follows a page which changes
 its background later, and that switching off leaves no root filter behind.
 
-The end-to-end suite (`npm run smoke`, 98 checks) drives real headless Chrome
+The end-to-end suite (`npm run smoke`, 130 checks) drives real headless Chrome
 over the DevTools protocol: it installs the built extension, plays generated
 media, and asserts that the filter is applied, that the curve *changes across a
 scene change*, that **screenshotted pixels** show lifted shadows and compressed
 highlights at the default strength, that a controlled white flash is dimmed and
 then released, that the analysis cost stays small, that the audio graph engages,
-that settings apply live, that nested frames are covered, and that no console
-errors are produced.
+that settings apply live, that nested frames are covered, that a player served
+cross-origin without CORS is handed its sound back at once and its picture put
+on the fixed curve at the set brightness (in the LUT and in rendered pixels),
+that the popup's meter moves with the scene and *Hold to compare* takes the
+curve off for exactly as long as it is held — including when the popup is closed
+mid-hold — that the welcome page opens once on install with its demonstration
+running the real curve, that the presets write what they say, and that no
+console errors are produced.
 
 It covers dark mode against rendered pixels too: that the bench page — which is
 already dark — is left to its own presentation, that making it light causes the
@@ -1407,6 +1491,9 @@ src/
     page.ts                canvas luminance, the dark-mode plan and its CSS
     music.ts               music host + audio-only element heuristics
     readings.ts            plain-language descriptions of the current effect
+    meter.ts               the live meter: gain now, light ratio now, and its wording
+    presets.ts             the three one-tap presets, and which one is active
+    night-trial.ts         "Try it now": the night gate off until Chrome restarts
     media-origin.ts        Web Audio cross-origin safety classification
     status.ts              per-frame -> per-tab aggregation
     messages.ts            message contract
@@ -1415,16 +1502,18 @@ src/
     index.ts               per-frame bootstrap and wiring
     media-registry.ts      discovery, dedupe, lifecycle
     light-sensor.ts        AmbientLightSensor wrapper (absence is normal)
-    audio-engine.ts        Web Audio chain, probes, rollback
+    audio-engine.ts        Web Audio chain, cross-origin refusal, Compare, meter
     video-engine.ts        frame measurement + adaptation loop
     image-engine.ts        the fixed <img> curve (no measurement, no discovery)
     page-engine.ts         root filter + the "is this page already dark?" probe
     tone-filter.ts         SVG filter + CSS rule management
     status-reporter.ts     throttled status push
   background/
-    service-worker.ts      defaults + status relay + toolbar badge
+    service-worker.ts      defaults + status relay + toolbar badge + welcome page
   popup/
     popup.html/.css/.ts    the UI
+  welcome/
+    welcome.html/.css/.ts  the page opened once on install: before/after, presets, Try it now
 tests/                     Vitest suites
 test-page/                 local manual test bench (generated media)
 scripts/
@@ -1436,6 +1525,7 @@ scripts/
   serve-test-page.mjs      static server for the bench
   smoke.mjs                real-Chrome end-to-end checks
   popup-shot.mjs           dev utility: screenshot the popup and check its height
+  store-shots.mjs          the Chrome Web Store screenshots and tile, from dist/
 ```
 
 ## License

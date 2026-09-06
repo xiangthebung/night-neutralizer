@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Night Neutralizer is installed</title>
+    <link rel="stylesheet" href="welcome.css" />
+  </head>
+  <body>
+    <!--
+      Opened once, on install. It exists because the shipped default is *Only
+      at night*, and an install at three in the afternoon otherwise does nothing
+      at all until nine: a first impression indistinguishable from broken.
+
+      Everything on this page is generated here — the scene is drawn on a
+      canvas, the sound is synthesised — and the "after" half runs the same
+      maths the content script runs, so what it shows is the real effect
+      rather than a picture of one. Nothing is fetched.
+    -->
+    <main class="page">
+      <header class="hero">
+        <span class="moon" aria-hidden="true"></span>
+        <div>
+          <p class="eyebrow">Installed</p>
+          <h1>Night Neutralizer</h1>
+          <p class="lede">
+            For watching in a dark room without turning the screen up or the volume down.
+            Dark scenes get opened up, glare gets pulled back, and quiet dialogue comes up to
+            meet the loud parts — the peaks are left where they are.
+          </p>
+        </div>
+      </header>
+
+      <section class="demo" aria-labelledby="demo-title">
+        <h2 id="demo-title">The same scene, twice</h2>
+        <p class="sub">
+          A night interior, a hard cut to daylight, and a fade back. The right-hand side is
+          the real tone curve — measured from these frames the way it is measured from a
+          film's — so what it does here is what it does to a video.
+        </p>
+        <div class="split">
+          <figure>
+            <canvas id="before" width="640" height="360"></canvas>
+            <figcaption>As the site sends it</figcaption>
+          </figure>
+          <figure>
+            <canvas id="after" width="640" height="360" class="treated"></canvas>
+            <figcaption>
+              With Night Neutralizer <span class="live" id="video-meter"></span>
+            </figcaption>
+          </figure>
+        </div>
+        <svg class="defs" aria-hidden="true" focusable="false" width="0" height="0">
+          <defs>
+            <filter
+              id="nn-welcome-curve"
+              color-interpolation-filters="sRGB"
+              x="0%"
+              y="0%"
+              width="100%"
+              height="100%"
+            >
+              <feComponentTransfer id="nn-welcome-transfer">
+                <feFuncR type="table" tableValues="0 1" />
+                <feFuncG type="table" tableValues="0 1" />
+                <feFuncB type="table" tableValues="0 1" />
+              </feComponentTransfer>
+              <feColorMatrix id="nn-welcome-saturate" type="saturate" values="1" />
+            </filter>
+          </defs>
+        </svg>
+        <p class="scene-line">
+          <span id="scene-label">night interior</span> · <span id="scene-reading"></span>
+        </p>
+      </section>
+
+      <section class="sound" aria-labelledby="sound-title">
+        <h2 id="sound-title">And the sound</h2>
+        <p class="sub">
+          Four seconds: a whispered line, then a burst. Played through the real chain at your
+          current strength, well under full volume. Keep the volume where you would have it at
+          night.
+        </p>
+        <div class="sound-row">
+          <button type="button" class="play" id="play-original">Play as sent</button>
+          <button type="button" class="play accent" id="play-treated">Play softened</button>
+          <div class="level" aria-hidden="true">
+            <span class="level-fill" id="level-fill"></span>
+          </div>
+          <span class="level-text" id="level-text">—</span>
+        </div>
+        <p class="sound-line" id="sound-line"></p>
+      </section>
+
+      <section class="presets" aria-labelledby="presets-title">
+        <h2 id="presets-title">Pick a starting point</h2>
+        <div class="chips" id="chips">
+          <button type="button" class="chip" data-preset="dialogue" aria-pressed="false">
+            Dialogue
+          </button>
+          <button type="button" class="chip" data-preset="bedtime" aria-pressed="false">
+            Bedtime
+          </button>
+          <button type="button" class="chip" data-preset="balanced" aria-pressed="false">
+            Balanced
+          </button>
+        </div>
+        <p class="preset-line" id="preset-line"></p>
+      </section>
+
+      <section class="try" aria-labelledby="try-title">
+        <h2 id="try-title">It waits for night</h2>
+        <p class="sub" id="try-copy"></p>
+        <div class="try-row">
+          <button type="button" class="play accent" id="try-now">Try it now</button>
+          <span class="try-note" id="try-note"></span>
+        </div>
+      </section>
+
+      <section class="how" aria-labelledby="how-title">
+        <h2 id="how-title">Three things worth knowing</h2>
+        <ul>
+          <li>
+            <strong>Click the moon in the toolbar</strong> on any page with a player. The
+            line under the switch says what is happening on that tab, the meter under it
+            says how much, and <em>Hold to compare</em> shows the site's own output for as
+            long as you hold it.
+          </li>
+          <li>
+            <strong>Netflix, Prime Video and Disney+ get a fixed curve</strong>, because
+            protected video cannot be measured. <em>Brightness on protected video</em> in
+            More options sets how much it is dimmed.
+          </li>
+          <li>
+            <strong>Nothing leaves your browser.</strong> One permission, no network
+            requests, no accounts. Settings travel only through Chrome's own sync.
+          </li>
+        </ul>
+      </section>
+
+      <footer class="foot">
+        <span>Night Neutralizer <span id="version"></span></span>
+        <span id="shortcut-line"></span>
+      </footer>
+    </main>
+    <script src="welcome.js"></script>
+  </body>
+</html>

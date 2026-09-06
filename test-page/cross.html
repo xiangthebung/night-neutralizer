@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Night Neutralizer — cross-origin stand-in</title>
+  <!--
+    A player whose media comes from another origin without CORS headers.
+
+    `localhost` and `127.0.0.1` are different origins, so a clip uploaded to
+    the bench server and fetched back under the other name is cross-origin
+    without a certificate, a second server or a real host. That is the case
+    the extension has to get right on every player that serves its files from
+    a CDN with no `crossorigin` attribute: the sound cannot be routed through
+    Web Audio at all (a source node on CORS-cross-origin media outputs silence,
+    by specification), and the frames cannot be read back, so the picture
+    gets the fixed curve. The extension must say both of those things, and it
+    must leave the sound playing from the first sample rather than after a
+    probe.
+
+    The clip itself is recorded by the smoke test from the bench's own scene,
+    so the repository still holds no binary media. See `scripts/smoke.mjs`.
+  -->
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      background: #101318;
+      color: #d8dfec;
+      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    .stage { padding: 24px; max-width: 720px; }
+    p { margin: 0 0 12px; color: #8994a8; }
+    video { display: block; width: 640px; height: 360px; background: #000; border-radius: 8px; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+    button {
+      font: inherit;
+      padding: 6px 14px;
+      color: #d8dfec;
+      background: #161d2d;
+      border: 1px solid #1f2839;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+    #log { font: 12px ui-monospace, monospace; color: #8994a8; white-space: pre-line; }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <p>
+      Stand-in for a player whose media is served from another origin without CORS.
+      The extension must leave its sound alone from the first sample, say so, and put
+      the fixed curve on the picture.
+    </p>
+    <video id="cross" playsinline preload="auto"></video>
+    <div class="row">
+      <button id="play">Play</button>
+      <button id="pause">Pause</button>
+      <span id="src"></span>
+    </div>
+    <p id="log"></p>
+  </div>
+  <script>
+    const video = document.getElementById('cross');
+    const log = (line) => {
+      const el = document.getElementById('log');
+      el.textContent = `${line}\n${el.textContent}`.split('\n').slice(0, 6).join('\n');
+    };
+    const clip = new URLSearchParams(location.search).get('clip') || 'clip.webm';
+    // Same server, the other name: cross-origin by host string alone.
+    const host = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+    video.src = `http://${host}:${location.port}/blob/${clip}`;
+    document.getElementById('src').textContent = new URL(video.src).origin;
+    video.volume = 0.5;
+    for (const type of ['loadedmetadata', 'play', 'playing', 'pause', 'error', 'stalled']) {
+      video.addEventListener(type, () =>
+        log(`${type} t=${video.currentTime.toFixed(2)}${video.error ? ` code=${video.error.code}` : ''}`),
+      );
+    }
+    document.getElementById('play').addEventListener('click', () =>
+      video.play().catch((error) => log(`play failed: ${error.message}`)),
+    );
+    document.getElementById('pause').addEventListener('click', () => video.pause());
+  </script>
+</body>
+</html>

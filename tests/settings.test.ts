@@ -1,11 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   SettingsStore,
+  sanitizeProtectedBrightness,
   sanitizeSettings,
   settingsEqual,
   type ChangeListener,
 } from '../src/core/settings';
-import { DEFAULT_SETTINGS, SETTINGS_KEY } from '../src/core/types';
+import {
+  DEFAULT_SETTINGS,
+  MAX_PROTECTED_BRIGHTNESS,
+  MIN_PROTECTED_BRIGHTNESS,
+  SETTINGS_KEY,
+} from '../src/core/types';
 
 /** Minimal stand-in for a `chrome.storage` area plus its change emitter. */
 class FakeStorage {
@@ -72,6 +78,23 @@ describe('sanitizeSettings', () => {
     expect(sanitizeSettings({ videoStrength: '70' }).videoStrength).toBe(
       DEFAULT_SETTINGS.videoStrength,
     );
+  });
+
+  it('keeps the protected-video brightness on its own range, never at zero', () => {
+    // Clamped to the slider's floor rather than to 0: a stored 0 would be a
+    // black screen with a shadow lift on it, which reads as a broken player.
+    expect(sanitizeProtectedBrightness(undefined)).toBe(DEFAULT_SETTINGS.protectedBrightness);
+    expect(sanitizeProtectedBrightness('50')).toBe(DEFAULT_SETTINGS.protectedBrightness);
+    expect(sanitizeProtectedBrightness(Number.NaN)).toBe(DEFAULT_SETTINGS.protectedBrightness);
+    expect(sanitizeProtectedBrightness(0)).toBe(MIN_PROTECTED_BRIGHTNESS);
+    expect(sanitizeProtectedBrightness(-40)).toBe(MIN_PROTECTED_BRIGHTNESS);
+    expect(sanitizeProtectedBrightness(250)).toBe(MAX_PROTECTED_BRIGHTNESS);
+    expect(sanitizeProtectedBrightness(62.4)).toBe(62);
+    expect(sanitizeSettings({}).protectedBrightness).toBe(DEFAULT_SETTINGS.protectedBrightness);
+    expect(sanitizeSettings({ protectedBrightness: 0 }).protectedBrightness).toBe(
+      MIN_PROTECTED_BRIGHTNESS,
+    );
+    expect(sanitizeSettings({ protectedBrightness: 60 }).protectedBrightness).toBe(60);
   });
 
   it('coerces non-boolean flags to defaults', () => {
@@ -218,6 +241,7 @@ describe('settingsEqual', () => {
       { video: false },
       { images: false },
       { videoStrength: 1 },
+      { protectedBrightness: 50 },
       { darkMode: true },
       { nightOnly: false },
       { nightStart: 1 },

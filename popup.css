@@ -138,6 +138,149 @@ h1 {
   color: var(--text-dim);
 }
 
+/* ---------- the live block: summary, meter, compare ---------- */
+
+.live {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 2px 2px;
+}
+
+/*
+ * The summary may run to two lines on the players that need the longest
+ * sentence ("Picture only — this player's sound can't be processed"), so the
+ * dot sits on the first line rather than floating between two.
+ */
+.live .summary {
+  align-items: flex-start;
+  padding: 0;
+}
+
+.live .summary .dot {
+  margin-top: 5px;
+}
+
+.live-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 16px;
+}
+
+/*
+ * What is being applied at this instant. Tabular figures, because the number
+ * changes several times a second and a proportional "1" would make the whole
+ * line jitter sideways.
+ */
+.meter {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meter[data-held="true"] {
+  color: var(--text-dim);
+}
+
+/*
+ * Press-and-hold. A pill, so it reads as an action rather than as a fourth
+ * switch; while held it takes the accent, because for that moment the tab is
+ * showing the site's own output and the popup has to say so.
+ */
+.compare {
+  flex: none;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+.compare:hover {
+  color: var(--text);
+  border-color: #33405a;
+}
+
+.compare[aria-pressed="true"] {
+  color: #1a1408;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.compare:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- presets ---------- */
+
+.presets {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 2px;
+}
+
+.chips {
+  display: flex;
+  gap: 6px;
+}
+
+.chip {
+  flex: 1;
+  padding: 5px 0;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--text);
+  border-color: #33405a;
+}
+
+.chip[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-color: #6a5836;
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* One line saying what the active (or pointed-at) chip sets. */
+.preset-line {
+  margin: 0;
+  min-height: 15px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- cards ---------- */
 
 .card {
@@ -246,6 +389,38 @@ input[type="range"]:focus-visible {
 
 input[type="range"]:focus-visible::-webkit-slider-thumb {
   box-shadow: 0 0 0 3px rgba(143, 180, 255, 0.5);
+}
+
+/* A labelled slider downstairs (the protected-video brightness): its label and
+   value on one line, the track under them. Slimmer than the front sliders,
+   since it is a setting rather than the control someone opened the popup for. */
+.slider-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.slider-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+input[type="range"].slim {
+  height: 18px;
+}
+
+input[type="range"].slim::-webkit-slider-runnable-track {
+  height: 4px;
+}
+
+input[type="range"].slim::-webkit-slider-thumb {
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
 }
 
 /* ---------- switches ---------- */
@@ -618,6 +793,13 @@ kbd {
   background: var(--idle);
 }
 
+/* Waiting for playback: nothing wrong, nothing happening yet. A ring rather
+   than a disc, so "not yet" and "off" do not look alike. */
+.dot[data-state="idle"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--idle);
+}
+
 .notes {
   margin: 8px 0 0;
   padding-top: 8px;
@@ -791,6 +973,14 @@ kbd {
   .site-button[data-state="excluded"] {
     background: Highlight;
     color: HighlightText;
+  }
+
+  /* The chips and the Compare button carry their state in background too. */
+  .chip[aria-pressed="true"],
+  .compare[aria-pressed="true"] {
+    background: Highlight;
+    color: HighlightText;
+    border-color: Highlight;
   }
 
   /* Opacity is the only cue for these two states, and it survives

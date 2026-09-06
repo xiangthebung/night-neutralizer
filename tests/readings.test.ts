@@ -10,13 +10,17 @@ import {
   SHADOW_INPUT,
   audioEffect,
   describeAudioEffect,
+  describeStaticVideoEffect,
   describeVideoEffect,
+  staticVideoEffect,
   videoEffect,
 } from '../src/core/readings';
 import { audioTransferDb, mapAudioStrength, mapVideoStrength } from '../src/core/strength';
-import { adaptBounds, buildToneCurve } from '../src/core/tone-curve';
+import { adaptBounds, buildToneCurve, staticAdaptState } from '../src/core/tone-curve';
+import { DEFAULT_SETTINGS } from '../src/core/types';
 
 const STEPS = Array.from({ length: 101 }, (_, i) => i);
+const BRIGHTNESSES = [100, 90, 75, 60, 50, 40, 25];
 
 describe('videoEffect', () => {
   it('reports no effect at strength 0', () => {
@@ -84,6 +88,67 @@ describe('videoEffect', () => {
       expect(effect.whiteDrop).toBeGreaterThanOrEqual(0);
       previousGain = effect.shadowGain;
       previousDrop = effect.whiteDrop;
+    }
+  });
+});
+
+/**
+ * The protected-player caption. A Netflix tab used to be captioned with the
+ * adaptive figures — "whites 28% softer" over a curve that was softening them
+ * by 8% — so this reading is held to the fixed curve the content script
+ * actually installs there, and to the setting that curve takes its exposure from.
+ */
+describe('staticVideoEffect', () => {
+  it('reports no effect at strength 0, whatever the brightness', () => {
+    for (const brightness of BRIGHTNESSES) {
+      expect(staticVideoEffect(0, brightness)).toEqual({ bypass: true, shadowGain: 1, whiteDrop: 0 });
+      expect(describeStaticVideoEffect(0, brightness)).toEqual(['Picture untouched', '']);
+    }
+  });
+
+  it('agrees with the fixed curve the content script installs', () => {
+    for (const strength of [10, 45, 70, 100]) {
+      for (const brightness of BRIGHTNESSES) {
+        const params = mapVideoStrength(strength, brightness);
+        const curve = buildToneCurve(params, staticAdaptState(params), 65);
+        const effect = staticVideoEffect(strength, brightness);
+        expect(effect.bypass).toBe(false);
+        expect(effect.whiteDrop).toBeCloseTo(1 - (curve[curve.length - 1] as number), 10);
+        // 0.05 falls between entries 3 and 4 of a 65-entry table.
+        const lifted = effect.shadowGain * SHADOW_INPUT;
+        expect(lifted).toBeGreaterThanOrEqual(curve[3] as number);
+        expect(lifted).toBeLessThanOrEqual(curve[4] as number);
+      }
+    }
+  });
+
+  it('defaults to the shipped brightness rather than to no dimming', () => {
+    expect(staticVideoEffect(45)).toEqual(staticVideoEffect(45, DEFAULT_SETTINGS.protectedBrightness));
+    // The whole point of the setting: at its default, white on a protected
+    // player is clearly softer than it was with the exposure left at 1.
+    expect(staticVideoEffect(45).whiteDrop).toBeGreaterThan(staticVideoEffect(45, 100).whiteDrop + 0.15);
+    expect(staticVideoEffect(45, 100).whiteDrop).toBeLessThan(0.1);
+  });
+
+  it('softens whites further as the brightness comes down, never the reverse', () => {
+    for (const strength of [20, 45, 80]) {
+      let previous = -1;
+      for (const brightness of BRIGHTNESSES) {
+        const { whiteDrop } = staticVideoEffect(strength, brightness);
+        expect(whiteDrop).toBeGreaterThan(previous);
+        previous = whiteDrop;
+      }
+    }
+  });
+
+  it('is a different caption from the adaptive one, and just as short', () => {
+    expect(describeStaticVideoEffect(45)).not.toEqual(describeVideoEffect(45));
+    for (const strength of STEPS) {
+      for (const brightness of BRIGHTNESSES) {
+        for (const line of describeStaticVideoEffect(strength, brightness)) {
+          expect(line.length).toBeLessThanOrEqual(30);
+        }
+      }
     }
   });
 });

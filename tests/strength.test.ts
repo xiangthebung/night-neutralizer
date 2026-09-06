@@ -9,11 +9,16 @@ import {
   mapStrength,
   mapVideoStrength,
   normalizeStrength,
+  protectedExposure,
 } from '../src/core/strength';
 import { dbToGain } from '../src/core/math';
 import { sanitizeSettings } from '../src/core/settings';
 import { isIdentitySoftClip } from '../src/core/soft-clip';
-import { DEFAULT_SETTINGS } from '../src/core/types';
+import {
+  DEFAULT_SETTINGS,
+  MAX_PROTECTED_BRIGHTNESS,
+  MIN_PROTECTED_BRIGHTNESS,
+} from '../src/core/types';
 
 const STEPS = Array.from({ length: 101 }, (_, i) => i);
 
@@ -259,6 +264,42 @@ describe('mapVideoStrength', () => {
   });
 });
 
+describe('protectedExposure', () => {
+  it('is the setting as a multiplier, and defaults to the shipped value', () => {
+    expect(protectedExposure()).toBe(DEFAULT_SETTINGS.protectedBrightness / 100);
+    expect(protectedExposure(50)).toBe(0.5);
+    expect(protectedExposure(100)).toBe(1);
+  });
+
+  it('clamps a value off the slider rather than refusing it', () => {
+    // A hand-edited storage value must not black the screen out.
+    expect(protectedExposure(0)).toBe(MIN_PROTECTED_BRIGHTNESS / 100);
+    expect(protectedExposure(-10)).toBe(MIN_PROTECTED_BRIGHTNESS / 100);
+    expect(protectedExposure(500)).toBe(MAX_PROTECTED_BRIGHTNESS / 100);
+    expect(protectedExposure(Number.NaN)).toBe(DEFAULT_SETTINGS.protectedBrightness / 100);
+  });
+
+  it('reaches the fixed curve through the video params, and nothing else', () => {
+    expect(mapVideoStrength(45, 50).adapt.staticExposure).toBe(0.5);
+    expect(mapVideoStrength(45).adapt.staticExposure).toBe(
+      DEFAULT_SETTINGS.protectedBrightness / 100,
+    );
+    // The adaptive path is measured, so the setting has no business there:
+    // every other parameter is identical whatever the brightness says.
+    const dim = mapVideoStrength(45, MIN_PROTECTED_BRIGHTNESS);
+    const full = mapVideoStrength(45, MAX_PROTECTED_BRIGHTNESS);
+    expect({ ...dim, adapt: { ...dim.adapt, staticExposure: 0 } }).toEqual({
+      ...full,
+      adapt: { ...full.adapt, staticExposure: 0 },
+    });
+  });
+
+  it('is neutral in a bypass', () => {
+    expect(mapVideoStrength(0, 25).adapt.staticExposure).toBe(1);
+    expect(mapVideoStrength(0, 25).bypass).toBe(true);
+  });
+});
+
 describe('mapStrength', () => {
   it('returns both halves consistently', () => {
     const p = mapStrength(45);
@@ -460,5 +501,11 @@ describe('mapSettings', () => {
   it('passes the night EQ switch through', () => {
     const settings = sanitizeSettings({ strength: 50, nightEq: true });
     expect(mapSettings(settings).audio.eq.enabled).toBe(true);
+  });
+
+  it('passes the protected-video brightness through to the fixed curve', () => {
+    const settings = sanitizeSettings({ videoStrength: 45, protectedBrightness: 40 });
+    expect(mapSettings(settings).video).toEqual(mapVideoStrength(45, 40));
+    expect(mapSettings(settings).video.adapt.staticExposure).toBe(0.4);
   });
 });

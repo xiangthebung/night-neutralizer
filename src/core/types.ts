@@ -63,6 +63,23 @@ export interface Settings {
   /** 0 = bypass, 100 = strongest tone mapping. Drives video and stills alike. */
   videoStrength: number;
   /**
+   * Brightness on protected video, as a percentage of the original.
+   *
+   * On a player whose frames cannot be read — every DRM stream, and any
+   * cross-origin video served without CORS — the adaptive exposure servo never
+   * runs, and the fixed curve those players get used to leave white at 0.92.
+   * That is shadow lift with almost no glare protection, on exactly the
+   * players this extension is most used on. So the fixed curve takes an
+   * exposure of its own, chosen here rather than measured: 100 leaves the
+   * level alone and only the lift and the shoulder apply, 75 dims to
+   * three-quarters before the curve.
+   *
+   * Separate from the strength slider because it is a different kind of
+   * number: strength says how hard to correct what can be measured, this says
+   * how much to dim what cannot be.
+   */
+  protectedBrightness: number;
+  /**
    * Make the page dark.
    *
    * Asks the site first (`color-scheme: dark`) and only inverts the ones that
@@ -112,6 +129,7 @@ export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
   video: true,
   images: true,
   videoStrength: 45,
+  protectedBrightness: 75,
   darkMode: false,
   nightOnly: true,
   nightStart: 21 * 60,
@@ -120,6 +138,14 @@ export const DEFAULT_SETTINGS: Readonly<Settings> = Object.freeze({
 
 /** Hard cap on the exclusion list, so storage.sync quota cannot be exhausted. */
 export const MAX_DISABLED_SITES = 200;
+
+/**
+ * Lowest brightness the protected-video slider goes to. Below a quarter the
+ * fixed curve is a black screen with a shadow lift on it, which nobody wants
+ * and which would read as the extension having broken the player.
+ */
+export const MIN_PROTECTED_BRIGHTNESS = 25;
+export const MAX_PROTECTED_BRIGHTNESS = 100;
 
 export const SETTINGS_KEY = 'settings';
 
@@ -196,6 +222,12 @@ export interface AdaptConfig {
   /** Lift/roll strength used when frames cannot be analysed (DRM etc.). */
   staticLiftScale: number;
   staticRollScale: number;
+  /**
+   * Exposure multiplier for the fixed curve, 0.2..1. The adaptive servo cannot
+   * run where frames cannot be read, so this is the whole of the glare
+   * protection a protected player gets; see `Settings.protectedBrightness`.
+   */
+  staticExposure: number;
 }
 
 export interface VideoParams {
@@ -228,6 +260,12 @@ export interface ProcessingParams {
 export type VideoMode =
   /** Video processing disabled by settings. */
   | 'off'
+  /**
+   * Switched on and installed, but no frame has been measured yet — nothing
+   * has played. Distinct from `off` so a paused player reads as "waiting for
+   * playback" rather than as a switch someone forgot to turn on.
+   */
+  | 'idle'
   /** Frames are analysed; the tone curve tracks the content. */
   | 'adaptive'
   /** Frames cannot be read (DRM/cross-origin); a fixed curve is applied. */

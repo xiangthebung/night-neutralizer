@@ -23,7 +23,12 @@ const AUDIO_PRIORITY: AudioState[] = [
   'off',
 ];
 
-const VIDEO_PRIORITY: VideoMode[] = ['adaptive', 'static', 'unsupported', 'off'];
+/**
+ * `idle` sits below `unsupported`: a frame that cannot tone-map at all is worth
+ * saying, while one that merely has not played yet is the ordinary state of
+ * every player before the first click.
+ */
+const VIDEO_PRIORITY: VideoMode[] = ['adaptive', 'static', 'unsupported', 'idle', 'off'];
 
 /**
  * `active` first: one frame doing work is the headline whatever the others say

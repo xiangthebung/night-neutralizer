@@ -8,8 +8,11 @@
  * We therefore classify the source first:
  *   safe   - MSE/blob/data/file-less same-origin URLs, or an explicit
  *            crossorigin attribute (the fetch used CORS).
- *   risky  - plain cross-origin URL. Still processed, but verified with a
- *            short silence probe that can roll the graph back.
+ *   risky  - plain cross-origin URL. Not routed at all: a source node on it
+ *            outputs silence by specification, so the audio engine leaves the
+ *            element to play natively and reports the sound as blocked. (It
+ *            used to be routed and then verified with a 2.5 s silence probe;
+ *            the probe only ever confirmed this classification.)
  *   empty  - nothing loaded yet; re-classify after `loadedmetadata`.
  */
 export type MediaOriginClass = 'safe' | 'risky' | 'empty';

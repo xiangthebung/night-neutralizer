@@ -21,8 +21,12 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MSG, SESSION_STATUS_KEY } from '../src/core/messages';
+import { NIGHT_TRIAL_KEY } from '../src/core/night-trial';
 import { SETTINGS_KEY, type FrameStatus, type Settings } from '../src/core/types';
 import { sanitizeSettings } from '../src/core/settings';
+
+/** Mirrors `WELCOME_PAGE` in the worker, which is not importable without booting it. */
+const WELCOME_PAGE = 'welcome.html';
 
 type Listener = (...args: unknown[]) => unknown;
 
@@ -53,8 +57,12 @@ function area(initial: Record<string, unknown> = {}) {
 interface Harness {
   session: ReturnType<typeof area>;
   sync: ReturnType<typeof area>;
+  /** `chrome.storage.local`: where the night trial's flag lives. */
+  local: ReturnType<typeof area>;
   badges: { tabId?: number; text: string | null }[];
   icons: string[];
+  /** Every URL the worker opened in a tab. */
+  opened: string[];
   listeners: Map<string, Listener[]>;
   emit(event: string, ...args: unknown[]): unknown;
 }
@@ -63,8 +71,10 @@ interface Harness {
 function harness(settings: Partial<Settings> = {}): Harness {
   const session = area();
   const sync = area({ [SETTINGS_KEY]: sanitizeSettings(settings) });
+  const local = area();
   const badges: Harness['badges'] = [];
   const icons: string[] = [];
+  const opened: string[] = [];
   const listeners = new Map<string, Listener[]>();
 
   const on = (event: string) => ({
@@ -74,11 +84,20 @@ function harness(settings: Partial<Settings> = {}): Harness {
   });
 
   const chrome = {
-    runtime: { onInstalled: on('installed'), onStartup: on('startup'), onMessage: on('message') },
-    storage: { session, sync, local: sync, onChanged: on('storage') },
+    runtime: {
+      onInstalled: on('installed'),
+      onStartup: on('startup'),
+      onMessage: on('message'),
+      getURL: (file: string) => `chrome-extension://test/${file}`,
+    },
+    storage: { session, sync, local, onChanged: on('storage') },
     tabs: {
       query: async () => [{ id: 1 }, { id: 2 }],
       sendMessage: async () => undefined,
+      create: async (options: { url: string }) => {
+        opened.push(options.url);
+        return { id: opened.length };
+      },
       onRemoved: on('tabRemoved'),
     },
     commands: { onCommand: on('command') },
@@ -99,8 +118,10 @@ function harness(settings: Partial<Settings> = {}): Harness {
   return {
     session,
     sync,
+    local,
     badges,
     icons,
+    opened,
     listeners,
     emit(event, ...args) {
       let result: unknown;
@@ -333,6 +354,70 @@ describe('the toolbar badge', () => {
     env.emit('storage', { [SESSION_STATUS_KEY]: { newValue: {} } }, 'session');
     await settle(10);
     expect(env.badges).toEqual([]);
+  });
+});
+
+describe('the welcome page', () => {
+  it('opens once, on a first install', async () => {
+    // The shipped default is "only at night", so an afternoon install that
+    // opened nothing would look broken until nine. The page is the answer.
+    const env = harness();
+    await bootWorker();
+    env.emit('installed', { reason: 'install' });
+    await settle(10);
+    expect(env.opened).toEqual([`chrome-extension://test/${WELCOME_PAGE}`]);
+  });
+
+  it('does not open on an update or a reload', async () => {
+    // An update that opened a tab would be an interruption, and the page has
+    // nothing to say to someone who has already used the extension.
+    const env = harness();
+    await bootWorker();
+    env.emit('installed', { reason: 'update' });
+    env.emit('installed', { reason: 'chrome_update' });
+    env.emit('installed', {});
+    await settle(10);
+    expect(env.opened).toEqual([]);
+  });
+
+  it('still seeds the defaults whichever way it was installed', async () => {
+    const env = harness();
+    env.sync.data.clear();
+    await bootWorker();
+    env.emit('installed', { reason: 'update' });
+    await settle(10);
+    expect((env.sync.data.get(SETTINGS_KEY) as Settings).nightOnly).toBe(true);
+  });
+});
+
+describe('the night trial', () => {
+  it('puts the night restriction back when the browser next starts', async () => {
+    // "Try it now" on the welcome page switched it off for a look; the next
+    // browser session is the end of the look.
+    const env = harness({ nightOnly: false });
+    await env.local.set({ [NIGHT_TRIAL_KEY]: true });
+    await bootWorker();
+    env.emit('startup');
+    await settle(20);
+    expect((env.sync.data.get(SETTINGS_KEY) as Settings).nightOnly).toBe(true);
+    expect(env.local.data.get(NIGHT_TRIAL_KEY)).toBe(false);
+  });
+
+  it('leaves a restriction the user switched off themselves alone', async () => {
+    const env = harness({ nightOnly: false });
+    await bootWorker();
+    env.emit('startup');
+    await settle(20);
+    expect((env.sync.data.get(SETTINGS_KEY) as Settings).nightOnly).toBe(false);
+  });
+
+  it('repaints the badge on startup either way', async () => {
+    const env = harness({ enabled: false });
+    await bootWorker();
+    env.badges.length = 0;
+    env.emit('startup');
+    await settle(20);
+    expect(env.badges.at(-1)?.text).toBe('off');
   });
 });
 

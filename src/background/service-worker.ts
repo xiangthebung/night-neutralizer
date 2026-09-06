@@ -15,9 +15,13 @@
  */
 import { MSG, SESSION_STATUS_KEY, type ExtensionMessage } from '../core/messages';
 import { aggregateStatuses, pruneFrames } from '../core/status';
-import { createChromeSettingsStore } from '../core/settings';
+import { createChromeSettingsStore, type StorageAreaLike } from '../core/settings';
+import { restoreAfterNightTrial } from '../core/night-trial';
 import { SETTINGS_KEY, type FrameStatus, type GateReason } from '../core/types';
 import { debug } from '../core/log';
+
+/** The page opened once, on install. */
+export const WELCOME_PAGE = 'welcome.html';
 
 type FrameMap = Record<string, FrameStatus>;
 type TabMap = Record<string, FrameMap>;
@@ -252,17 +256,54 @@ async function refreshAction(): Promise<void> {
   await paintAction(settings.enabled);
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+function localArea(): StorageAreaLike | null {
+  return (chrome.storage?.local as unknown as StorageAreaLike | undefined) ?? null;
+}
+
+/**
+ * The welcome page, on a first install only.
+ *
+ * Not on update, and not on a browser or extension reload: an update that
+ * opened a tab would be an interruption, and this one has nothing to say to
+ * someone who has already used it. It exists because the shipped default is
+ * *Only at night*, and an install at three in the afternoon otherwise does
+ * nothing at all until nine — a first impression indistinguishable from
+ * broken. The page shows the effect on a scene of its own and offers to turn
+ * the night gate off for the session.
+ */
+function openWelcomePage(): void {
+  try {
+    const url = chrome.runtime.getURL?.(WELCOME_PAGE) ?? WELCOME_PAGE;
+    void chrome.tabs?.create?.({ url })?.catch?.((error: unknown) =>
+      debug('could not open the welcome page', error),
+    );
+  } catch (error) {
+    debug('could not open the welcome page', error);
+  }
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
   void createChromeSettingsStore()
     .ensureDefaults()
     .then((settings) => paintAction(settings.enabled))
     .catch((error) => debug('could not seed defaults', error));
+  if (details?.reason === 'install') openWelcomePage();
 });
 
 // The worker is torn down when idle, so the badge has to be re-established
 // whenever it wakes up rather than only at install time.
 chrome.runtime.onStartup?.addListener(() => {
-  void refreshAction().catch((error) => debug('could not restore badge', error));
+  void (async () => {
+    // "Try it now" on the welcome page switches the night restriction off for
+    // one browser session; a new session is where it goes back on.
+    const local = localArea();
+    if (local) {
+      await restoreAfterNightTrial({ local, settings: createChromeSettingsStore() }).catch(
+        (error) => debug('could not end the night trial', error),
+      );
+    }
+    await refreshAction();
+  })().catch((error) => debug('could not restore badge', error));
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {

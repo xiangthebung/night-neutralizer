@@ -96,13 +96,14 @@ const SITE_URL = `https://${HOST}/`;
 /** The shipped defaults, from `core/types.ts`. Each shot patches this. */
 const DEFAULTS = {
   enabled: true,
-  strength: 45,
-  linked: true,
   audioStrength: 45,
   videoStrength: 45,
+  protectedBrightness: 75,
   audio: true,
   video: true,
+  images: true,
   nightEq: false,
+  darkMode: false,
   disabledSites: [],
   nightOnly: true,
   nightStart: 21 * 60,
@@ -590,7 +591,11 @@ function tile(icon) {
 <body>
   <img src="${icon}" alt="">
   <h1>Night Neutralizer</h1>
-  <p>Dark scenes brighter. Loud parts quieter.</p>
+  <!-- Two claims the code supports: the shadow lift, and the quiet-part gain.
+       It used to say "loud parts quieter", which the chain does not do — the
+       offline render measures the loud passage at -0.09 dB from where it was.
+       Peaks are left where they are; the quiet parts come up to meet them. -->
+  <p>Dark scenes brighter. Quiet dialogue louder.</p>
 </body></html>`;
 }
 
@@ -744,15 +749,24 @@ async function main() {
   };
 
   const popup = await openPopup({ width: 460, height: 760 });
+  // The live row (the meter and Hold to compare) is fed over a port from the
+  // tab and arrives a beat after the status; the hero shot has to show it.
+  await popup.waitForFunction(
+    () => !document.getElementById('live-row').hidden && /dB now/.test(document.getElementById('meter').textContent),
+    null,
+    { timeout: 10_000 },
+  );
   const status = await popup.evaluate(() => ({
+    summary: document.getElementById('summary-text').textContent,
+    meter: document.getElementById('meter').textContent,
     audio: document.getElementById('audio-status').textContent,
-    video: document.getElementById('video-status').textContent,
+    picture: document.getElementById('picture-status').textContent,
     site: document.getElementById('site-toggle').hidden
       ? '(no site button)'
       : document.getElementById('site-toggle-text').textContent,
   }));
   process.stdout.write(
-    `  popup reports: ${status.audio} / ${status.video} / ${status.site}\n`,
+    `  popup reports: "${status.summary}" / "${status.meter}" / ${status.audio} / ${status.picture} / ${status.site}\n`,
   );
   const popupShot = await popup.locator('.app').screenshot();
 
@@ -778,7 +792,6 @@ async function main() {
    * "waiting for 09:00 PM" in one build and "compressing 1 player" in the next.
    */
   await apply({
-    linked: false,
     audioStrength: 70,
     videoStrength: 25,
     disabledSites: [HOST],
@@ -786,18 +799,43 @@ async function main() {
   // The frame has to notice the change and report it, and the popup polls status
   // every 1.5 s, before the panel can name the site it is leaving alone.
   await wait(4500);
+  // Everything behind the disclosure is part of "every control", so open it.
+  await popup.evaluate(() => {
+    document.getElementById('more').open = true;
+  });
+  await wait(600);
 
-  const NIGHT_CARD = 'section.card[aria-labelledby="when-title"]';
+  /**
+   * Three columns, because the popup is a front and a disclosure: the front
+   * (the switch, the summary, the presets, the two panels); the night card and
+   * the sound and picture options behind the disclosure (both graphs, night EQ,
+   * the music exemption, the video/image split, the protected-video brightness,
+   * dark mode); and the per-tab report with the skip list, the shortcut and
+   * reset. Two columns came out at 0.84x with the disclosure open, which is a
+   * soft picture of a panel that is meant to be read.
+   */
   const columns = [
-    ['.header', '#controls'],
-    [NIGHT_CARD, 'section.card.status'],
+    ['.header', '#picture-card'],
+    ['section.card[aria-labelledby="when-title"]', 'section.sub[aria-labelledby="more-picture"]'],
+    ['section.sub[aria-labelledby="more-tab"]', '.more-body > section.sub:last-of-type'],
   ];
-  // Measured unzoomed, then zoomed to fit: the graph canvases hold their detail
-  // up to 1.93x their layout size and no further, and the taller column has to
-  // leave a margin inside the 672px stage.
+  const COLUMN_GAP = 18;
+  const COLUMN_PAD = 16;
+  // Measured unzoomed, then zoomed to fit both ways: the tallest column inside
+  // the 672px stage with a margin, and the three side by side inside its width.
+  // The graph canvases hold their detail up to 1.93x their layout size and no
+  // further, hence the cap.
   const boxes = await Promise.all(columns.map(([first, last]) => slab(popup, first, last)));
   const tallest = Math.max(...boxes.map((box) => box.height));
-  const zoom = Math.min(1.9, Math.round(((STAGE - 84) / tallest) * 100) / 100);
+  const widest = Math.max(...boxes.map((box) => box.width));
+  const zoom = Math.min(
+    1.9,
+    Math.floor(((STAGE - 84) / tallest) * 100) / 100,
+    Math.floor(
+      ((WIDTH - 2 * COLUMN_PAD - (columns.length - 1) * COLUMN_GAP) / (columns.length * widest)) *
+        100,
+    ) / 100,
+  );
   // `page.screenshot({ clip })` cannot reach outside the viewport, and zooming a
   // 330x556 panel to 1.7x makes it both wider and much taller than the window it
   // was opened in. The whole panel has to fit, not just the tallest column: the
@@ -839,7 +877,7 @@ async function main() {
     frame({
       eyebrow: 'Night Neutralizer &middot; Chrome extension',
       title: 'Watch in the dark without the glare.',
-      note: 'Shadows opened up, whites pulled back, quiet dialogue brought up to the effects. One slider, and it applies without a reload.',
+      note: 'Shadows opened up, whites pulled back, quiet dialogue brought up to the effects. A live meter says how much, and Hold to compare shows the difference — no reload, ever.',
       body:
         `<img class="page" src="${dataUrl(heroShot)}" alt="">` +
         `<img class="popup" src="${dataUrl(popupShot)}" alt="">`,
@@ -873,8 +911,8 @@ async function main() {
       title: 'Every control, and a straight answer about each.',
       note: 'Both graphs are drawn from the same maths the engines run, and the caption under each states the change in numbers. The status lines say what is happening right now — here, nothing, because this site is on the skip list.',
       body:
-        `<div class="cards">` +
-        `<img src="${dataUrl(panels[0])}" alt=""><img src="${dataUrl(panels[1])}" alt="">` +
+        `<div class="cards" style="--gap: ${COLUMN_GAP}px; padding: 0 ${COLUMN_PAD}px">` +
+        panels.map((png) => `<img src="${dataUrl(png)}" alt="">`).join('') +
         `</div>`,
       stamp: STAND_IN,
     }),

@@ -13,13 +13,16 @@
  *  - Release time grows with strength: heavier compression with a short
  *    release is what produces audible pumping.
  */
-import type {
-  AudioParams,
-  CompressorParams,
-  EqParams,
-  ProcessingParams,
-  Settings,
-  VideoParams,
+import {
+  DEFAULT_SETTINGS,
+  MAX_PROTECTED_BRIGHTNESS,
+  MIN_PROTECTED_BRIGHTNESS,
+  type AudioParams,
+  type CompressorParams,
+  type EqParams,
+  type ProcessingParams,
+  type Settings,
+  type VideoParams,
 } from './types';
 import { clamp, lerp, smoothstep } from './math';
 import { IDENTITY_SOFT_CLIP } from './soft-clip';
@@ -116,8 +119,23 @@ export function neutralVideoParams(): VideoParams {
       flashTau: 0.55,
       staticLiftScale: 0,
       staticRollScale: 0,
+      staticExposure: 1,
     },
   };
+}
+
+/**
+ * The protected-video brightness setting as an exposure multiplier. A number
+ * outside the slider's range is clamped rather than refused, so a hand-edited
+ * storage value cannot black the screen out.
+ */
+export function protectedExposure(
+  protectedBrightness: number = DEFAULT_SETTINGS.protectedBrightness,
+): number {
+  const percent = Number.isFinite(protectedBrightness)
+    ? clamp(protectedBrightness, MIN_PROTECTED_BRIGHTNESS, MAX_PROTECTED_BRIGHTNESS)
+    : DEFAULT_SETTINGS.protectedBrightness;
+  return percent / 100;
 }
 
 /**
@@ -212,8 +230,16 @@ export function mapAudioStrength(strength: number, nightEq = false): AudioParams
 /**
  * Video tone-mapping parameters. The adaptive loop scales `blackLift`,
  * `shadowGamma` and `highlightCompression` per scene; these are the ceilings.
+ *
+ * `protectedBrightness` is the second setting the picture path runs on, and it
+ * defaults to the shipped value rather than to "no dimming" so a caller that
+ * forgets it — a test, the popup's preview — describes the curve a protected
+ * player actually gets instead of a weaker one that nothing ships.
  */
-export function mapVideoStrength(strength: number): VideoParams {
+export function mapVideoStrength(
+  strength: number,
+  protectedBrightness: number = DEFAULT_SETTINGS.protectedBrightness,
+): VideoParams {
   const t = normalizeStrength(strength) / 100;
   if (t <= 0) return neutralVideoParams();
 
@@ -259,14 +285,21 @@ export function mapVideoStrength(strength: number): VideoParams {
       // scenes.
       staticLiftScale: 0.8,
       staticRollScale: 0.85,
+      // The one number the fixed curve has that the adaptive one does not: a
+      // protected player cannot be measured, so its exposure is a setting.
+      staticExposure: protectedExposure(protectedBrightness),
     },
   };
 }
 
-export function mapStrength(strength: number, nightEq = false): ProcessingParams {
+export function mapStrength(
+  strength: number,
+  nightEq = false,
+  protectedBrightness: number = DEFAULT_SETTINGS.protectedBrightness,
+): ProcessingParams {
   return {
     audio: mapAudioStrength(strength, nightEq),
-    video: mapVideoStrength(strength),
+    video: mapVideoStrength(strength, protectedBrightness),
   };
 }
 
@@ -278,7 +311,7 @@ export function mapStrength(strength: number, nightEq = false): ProcessingParams
 export function mapSettings(settings: Settings): ProcessingParams {
   return {
     audio: mapAudioStrength(settings.audioStrength, settings.nightEq),
-    video: mapVideoStrength(settings.videoStrength),
+    video: mapVideoStrength(settings.videoStrength, settings.protectedBrightness),
   };
 }
 

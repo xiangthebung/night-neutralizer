@@ -39,14 +39,51 @@
 
       <!--
         One sentence for the whole tab, directly under the switch that governs
-        it. The two per-path lines it summarises are still rendered, in "More
-        options" — they explain *why* when the answer is surprising, and the
-        answer is usually not surprising.
+        it, and under that the proof: a meter of what is being applied at this
+        moment, fed live by the tab, and a button that shows the site's own
+        sound and picture for exactly as long as it is held. The two per-path
+        lines the sentence summarises are still rendered, in "More options" —
+        they explain *why* when the answer is surprising.
       -->
-      <p class="summary" id="summary" role="status" aria-live="polite">
-        <span class="dot" id="summary-dot" data-state="idle" aria-hidden="true"></span>
-        <span id="summary-text">Checking this tab…</span>
-      </p>
+      <div class="live">
+        <p class="summary" id="summary" role="status" aria-live="polite">
+          <span class="dot" id="summary-dot" data-state="idle" aria-hidden="true"></span>
+          <span id="summary-text">Checking this tab…</span>
+        </p>
+        <div class="live-row" id="live-row" hidden>
+          <span class="meter" id="meter"></span>
+          <button
+            type="button"
+            class="compare"
+            id="compare"
+            aria-pressed="false"
+            title="Hold to see and hear this tab as the site sends it. Let go to bring the softening back."
+          >
+            Hold to compare
+          </button>
+        </div>
+      </div>
+
+      <!--
+        Three answers to "what should I set this to?", in the vocabulary of the
+        situation rather than the mechanism. Each chip writes a few settings;
+        the line under them says which, so a tap is never a mystery.
+      -->
+      <div class="presets" role="group" aria-labelledby="presets-title">
+        <span class="sr-only" id="presets-title">Presets</span>
+        <div class="chips" id="chips">
+          <button type="button" class="chip" data-preset="dialogue" aria-pressed="false">
+            Dialogue
+          </button>
+          <button type="button" class="chip" data-preset="bedtime" aria-pressed="false">
+            Bedtime
+          </button>
+          <button type="button" class="chip" data-preset="balanced" aria-pressed="false">
+            Balanced
+          </button>
+        </div>
+        <p class="preset-line" id="preset-line"></p>
+      </div>
 
       <!--
         A panel is a thing being treated: its switch, how much, and a line of
@@ -64,7 +101,7 @@
             <span class="track" aria-hidden="true"><span class="thumb"></span></span>
           </label>
         </div>
-        <p class="card-desc">Quiet dialogue up, loud scenes down</p>
+        <p class="card-desc" id="sound-desc">Quiet dialogue up, peaks left alone</p>
         <input
           type="range"
           id="audio-strength"
@@ -92,7 +129,7 @@
             <span class="track" aria-hidden="true"><span class="thumb"></span></span>
           </label>
         </div>
-        <p class="card-desc">Shadows lifted, glare pulled back</p>
+        <p class="card-desc" id="picture-desc">Shadows lifted, glare pulled back</p>
         <input
           type="range"
           id="video-strength"
@@ -188,6 +225,7 @@
               <figcaption class="reading" id="video-curve-caption">
                 <span id="video-reading-1">Dark scenes brighter</span>
                 <span id="video-reading-2">Whites softer</span>
+                <span id="video-reading-3" hidden></span>
               </figcaption>
             </figure>
 
@@ -204,6 +242,40 @@
                 <span class="track" aria-hidden="true"><span class="thumb"></span></span>
               </label>
             </div>
+
+            <!--
+              The one number a protected player runs on. Netflix, Prime Video
+              and Disney+ cannot be measured, so the scene-by-scene dimming the
+              graph above shows never happens there; this fixed level stands in
+              for it.
+            -->
+            <div class="slider-row">
+              <!--
+                No hint beside the label: with the value on the same line the
+                three service names wrapped, leaving "Disney+" alone under the
+                slider. They are named in the note instead.
+              -->
+              <label class="slider-label" for="protected-brightness"
+                >Brightness on protected video</label
+              >
+              <output class="value" id="protected-brightness-value" for="protected-brightness"
+                >75%</output
+              >
+            </div>
+            <input
+              type="range"
+              id="protected-brightness"
+              class="slim"
+              min="25"
+              max="100"
+              step="5"
+              value="75"
+              aria-label="Brightness on protected video"
+            />
+            <p class="row-note" id="protected-note">
+              Netflix, Prime Video and Disney+ can't be measured, so this fixed level
+              stands in for the scene-by-scene dimming.
+            </p>
 
             <!--
               The page around the media rather than the media itself, which is
@@ -250,8 +322,13 @@
           </section>
 
           <section class="sub">
-            <p class="shortcut" id="shortcut" hidden>
-              <kbd id="shortcut-keys"></kbd> toggles it anywhere.
+            <!--
+              Always rendered. An unbound shortcut used to hide this row, which
+              left no way to discover that a shortcut existed to be set.
+            -->
+            <p class="shortcut" id="shortcut">
+              <span id="shortcut-bound"><kbd id="shortcut-keys"></kbd> toggles it anywhere ·</span>
+              <span id="shortcut-none" hidden>No shortcut set ·</span>
               <button type="button" id="shortcut-edit" class="link-button">Change</button>
             </p>
             <button type="button" id="reset" class="link-button">Reset to defaults</button>

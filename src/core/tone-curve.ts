@@ -165,12 +165,22 @@ export function createAdaptState(): AdaptState {
  * Fixed state used when frames cannot be analysed (DRM, tainted canvas). The
  * result is an honest static curve: no scene tracking, no flash guard, and no
  * histogram, so the slope allocation stays out of it too.
+ *
+ * It does carry an exposure, and that is the one thing about it that is a
+ * setting rather than a compromise. The adaptive path dims a bright scene with
+ * a servo that measures the frame; here nothing can be measured, so the servo's
+ * whole contribution — the glare protection — would be missing. With exposure
+ * at 1 the fixed curve left white at 0.92 at the default strength, against
+ * 0.71 on a measured bright scene: shadow lift with almost no dimming, on the
+ * players people most use this on. `staticExposure` (from the protected-video
+ * brightness setting) is what stands in for the servo.
  */
 export function staticAdaptState(params: VideoParams): AdaptState {
   const lift = params.adapt.staticLiftScale;
   const roll = params.adapt.staticRollScale;
+  const exposure = clamp(params.adapt.staticExposure ?? 1, 0.2, 1);
   return {
-    exposure: 1,
+    exposure,
     liftScale: lift,
     rollScale: roll,
     flash: 0,
@@ -178,7 +188,7 @@ export function staticAdaptState(params: VideoParams): AdaptState {
     initialized: true,
     // Its own resting place, so advancing it is a no-op rather than a slow
     // drift back to the identity curve.
-    targets: { exposure: 1, lift, roll, darkAdapt: 0, histogram: null },
+    targets: { exposure, lift, roll, darkAdapt: 0, histogram: null },
     histogram: null,
     prevHistogram: null,
     cut: 0,

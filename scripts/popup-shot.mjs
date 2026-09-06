@@ -89,6 +89,7 @@ if (swTarget) {
       video: true,
       images: true,
       videoStrength: Number(process.env.VIDEO_STRENGTH ?? strength),
+      protectedBrightness: 75,
       // On by default for the same reason the night window is: dark mode's
       // readout line is part of the worst-case height, and measuring it hidden
       // would flatter the layout. DARK_MODE=0 turns it off.
@@ -136,10 +137,17 @@ const size = await page.send('Runtime.evaluate', {
      const button = document.getElementById('site-toggle');
      const wasHidden = button.hidden;
      button.hidden = false;
+     // The live row (the meter and Compare) only shows over a tab with a
+     // player, which this profile has none of, so it is revealed the same way
+     // the per-site button is: it is part of the state the popup opens at.
+     const live = document.getElementById('live-row');
+     const liveWasHidden = live.hidden;
+     live.hidden = false;
      const withSite = document.body.scrollHeight;
      more.open = true;
      const expanded = document.body.scrollHeight;
      button.hidden = wasHidden;
+     live.hidden = liveWasHidden;
      more.open = ${expand};
      const keys = document.getElementById('shortcut-keys');
      return JSON.stringify({
@@ -164,7 +172,7 @@ const { w, h, docWidth, withSite, expanded, shot: shotHeight, shortcutShown, sho
 const verdict = withSite > 600 ? `OVER the 600 cap by ${withSite - 600}` : 'fits the 600 cap';
 console.log(
   `strength ${strength}: popup is ${w} x ${h} CSS px ` +
-    `(${withSite} with the per-site button) — ${verdict}`,
+    `(${withSite} with the per-site button and the live row) — ${verdict}`,
 );
 console.log(`with "More options" open: ${expanded} CSS px (scrolls past 600 by design)`);
 console.log(

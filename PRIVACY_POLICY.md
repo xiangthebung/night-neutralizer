@@ -1,14 +1,15 @@
 # Night Neutralizer Privacy Policy
 
-Effective: August 29, 2026
+Effective: September 4, 2026
 
 Night Neutralizer softens harsh video, images and audio for night-time viewing. It runs entirely inside your browser. It has no server, no account, no analytics and no payment processor, and it makes no network requests of any kind.
 
 ## What is stored, and where
 
-Your settings live in `chrome.storage.sync`, falling back to `chrome.storage.local` when sync is unavailable. That is the whole of what reaches disk, and this is the whole list:
+Your settings live in `chrome.storage.sync`, falling back to `chrome.storage.local` when sync is unavailable. Apart from the one flag described after it, that is the whole of what reaches disk, and this is the whole list:
 
 - whether the extension is on, and the strength values for audio and video
+- the brightness on protected video — the fixed level a player whose frames cannot be read is dimmed to
 - whether audio processing, video processing, still-image processing and night EQ are enabled
 - whether music is left alone
 - whether the page itself is darkened behind the media
@@ -16,6 +17,8 @@ Your settings live in `chrome.storage.sync`, falling back to `chrome.storage.loc
 - **the list of hostnames you have excluded**, capped at 200 entries
 
 Worth being plain about the last one: because settings use `chrome.storage.sync`, that exclusion list is synchronised through your Google account like any other Chrome setting, if you have Chrome Sync switched on. It is a list of bare hostnames you chose to add. Nothing else about your browsing is recorded. If you would rather it did not sync, turn off extension syncing in Chrome's settings.
+
+One flag lives in `chrome.storage.local` only, so it stays on this device and is never synchronised: whether *Only at night* was switched off for a look by **Try it now** on the page that opens after installing. It is a single yes-or-no value. When Chrome next starts the extension reads it, switches the night restriction back on, and clears it; changing *Only at night* yourself in the popup clears it too.
 
 Separately, `chrome.storage.session` holds a short-lived status record for each frame of each open tab, so the popup and the toolbar badge can describe what is happening. Each record holds the normalised hostname of the top-level page, how many media elements were found, how many are being compressed or were left alone, which tone-mapping mode the picture path is in, how many pictures the image curve is on, whether the page treatment is asking or inverting, whether processing is active and why not when it is not, any explanatory notes the popup shows you, the last ambient light reading, and a copy of the settings above so the badge can be painted without a second read. `chrome.storage.session` is memory-only — it is never written to disk, the record for a tab is deleted when that tab closes, and the whole area is discarded when Chrome exits. It holds a hostname, never a URL, a page title, a query string or a history.
 
@@ -41,7 +44,7 @@ Night Neutralizer declares no host permissions for network access, contacts no a
 
 ## Retention and deletion
 
-Settings stay until you change them or uninstall the extension. Session status is gone when the tab or the browser closes. Uninstalling removes everything. The exclusion list is the only stored item that names anything you visited, and you can empty it at once from the popup: **More options → This tab → Clear**, next to the count of skipped sites. **Reset to defaults**, below it, clears every setting including that list.
+Settings stay until you change them or uninstall the extension. Session status is gone when the tab or the browser closes, and the *Try it now* flag is cleared the next time Chrome starts. Uninstalling removes everything. The exclusion list is the only stored item that names anything you visited, and you can empty it at once from the popup: **More options → This tab → Clear**, next to the count of skipped sites. **Reset to defaults**, below it, clears every setting including that list.
 
 ## Limited Use
 

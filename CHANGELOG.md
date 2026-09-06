@@ -4,9 +4,70 @@ Notable changes per release. Dates are release dates; the format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely and versions
 follow [semver](https://semver.org/).
 
-## [Unreleased]
+## [1.1.0] - 2026-09-04
 
 ### Added
+
+- **Brightness on protected video.** On Netflix, Prime Video and Disney+ the
+  frames cannot be read, so the exposure servo — the part of the tone mapper
+  that dims a bright scene — never ran there, and the fixed curve those players
+  got left white at 0.92 at the default strength, against 0.71 on a measured
+  bright scene: shadow lift with almost no glare protection, on the players
+  this extension is most used on. The fixed curve now takes an exposure of its
+  own from a new setting, *Brightness on protected video* in More options,
+  25 to 100% and 75% by default. Measured on the smoke run's protected-player
+  path, off the LUT the content script writes: white 0.920 at 100% → 0.745 at
+  the default → 0.555 at 50%; and on rendered pixels a bright frame's mean
+  comes down from 0.79 to 0.63 at the default where 100% left it at 0.78, while
+  a dark frame's shadow band still triples (0.021 → 0.062). Nothing about the
+  adaptive path changes: `mapVideoStrength` takes the brightness as a second
+  argument that reaches `adapt.staticExposure` and nothing else, and
+  `staticAdaptState` clamps it to 0.2..1 so a hand-edited value cannot black
+  the screen out. The popup's picture card, graph and captions describe the
+  fixed curve while the tab in front of you is on it — *Protected player: fixed
+  curve at 75% brightness*, one line and no band, *Fixed curve on this player*
+  — instead of the adaptive figures they used to quote over a curve that was
+  not running.
+
+- **Hold to compare, and a live meter.** Under the one-line summary, while the
+  tab has a player running: `+9 dB now · −31% light now` is the net gain the
+  audio chain is applying at this instant (pre-gain and make-up less the
+  compressor's and the limiter's current reduction, read off the nodes) and the
+  change in the light the frame on screen gives off (the curve on the filter,
+  weighted by the last measured histogram, in linear light). Beside it, a
+  press-and-hold button shows the site's own sound and picture for exactly as
+  long as it is held: the audio graph runs transparent, the tone curve comes off
+  the video and image rules while everything else on them stays, and the
+  engines keep measuring underneath, so release restores the curve the scene
+  needs *now*. Both ride a `chrome.tabs.connect` port (`core/messages.ts`)
+  rather than the status channel or a setting: the meter has to move several
+  times a second, and a held comparison has to end the moment the popup closes
+  — the content script treats the port disconnecting as the button coming up,
+  which the smoke run checks by closing the popup mid-hold. `tabs.connect`
+  needs no permission.
+
+- **A welcome page, once, on install.** The shipped default is *Only at
+  night*, so an install at three in the afternoon did nothing at all until
+  nine — a first impression indistinguishable from broken. `onInstalled` with
+  reason `install` (never `update`) now opens `welcome.html`: the real tone
+  curve running on a scene the page draws itself, measured and adapted with
+  the same three calls the content script makes; a whispered line and a burst
+  played through the real audio chain at the user's strength; the three
+  presets; and **Try it now**, which switches *Only at night* off until Chrome
+  next starts. That is a trial rather than a decision: a flag in
+  `chrome.storage.local` records why the switch is off, the service worker's
+  `onStartup` puts the restriction back and clears it, and changing the switch
+  by hand clears it too, so a restart never overrules the user. The popup says
+  *Off for a look; the hours come back when Chrome restarts* meanwhile.
+
+- **Presets.** *Dialogue* (sound 70 with night EQ, picture left as it is),
+  *Bedtime* (both at 70 with night EQ, dark mode on) and *Balanced* (the
+  shipped defaults), as chips on the front of the popup and on the welcome
+  page, each with one line under them saying exactly which settings the tap
+  writes. Which chip is lit is answered by the settings, most specific preset
+  first, rather than by remembering the last click; a slider dragged off a
+  preset lights none. No preset touches the night window, the master switch,
+  the skip list or the protected-video brightness.
 
 - **Four new test suites, for the four places nothing was looking.** The
   static-mode video path (DRM and tainted canvases — a large share of real
@@ -144,6 +205,28 @@ follow [semver](https://semver.org/).
   already promised the list could be cleared from the popup; now that is true.
 
 ### Fixed
+
+- **The summary tells the truth on the three players a first-time user meets
+  most.** A paused player that had never played read as *Nothing to soften on
+  this page*; it now reads *Waiting for playback*, with the video engine
+  reporting `idle` rather than `off` before its first frame. A cross-origin
+  player whose sound cannot be routed at all read as *Softening the sound and
+  picture*, because `partial` counted as working; it now reads *Picture only —
+  this player's sound can't be processed*. A protected player was described in
+  the same words as a measured one; it is now *Softening the sound and picture
+  · protected video*, and the picture status line says *fixed curve, protected
+  video*.
+
+- **An unbound shortcut no longer hides the way to bind one.** The shortcut row
+  disappeared entirely when nothing was bound, taking the *Change* link with
+  it. It now reads *No shortcut set · Change*.
+
+- **The store assets were stale, and one of them was false.** The screenshots
+  showed the old single-slider popup, and the promotional tile said *Loud parts
+  quieter*, which the chain does not do — the offline render puts the loud
+  passage at −0.09 dB from where it was. The tile now says *Dark scenes
+  brighter. Quiet dialogue louder.*, and all four files are regenerated from
+  this build.
 
 - **The smoke run's step-size check no longer measures the test machine.**
   “No single curve update is large enough to read as a step” compared each
@@ -361,6 +444,26 @@ follow [semver](https://semver.org/).
 
 ### Changed
 
+- **Cross-origin media without CORS is refused up front instead of probed.** A
+  `MediaElementAudioSourceNode` on CORS-cross-origin media outputs silence by
+  specification, and a plain cross-origin `src` with no `crossorigin` attribute
+  is always CORS-cross-origin, so the 2.5 s silence probe that used to confirm
+  the classification only ever confirmed it — at the cost of two and a half
+  seconds of silence at the start of every such player, a probe that a
+  genuinely quiet intro could fool, and an `AnalyserNode` tap on every risky
+  graph. The audio engine now leaves such an element to play natively from its
+  first sample, reports it `blocked` with the reason, and withdraws that
+  verdict if the source later moves to MSE or its own host. The audit asked for
+  a shorter probe if it could be done without false rollbacks; there is no
+  rollback left to be false. Measured in the smoke run's new cross-origin case:
+  the sound is reported as handed back within 1.5 s of play (tens of
+  milliseconds in practice), against 2.7 s before.
+
+- **The popup's front grew two rows** — the meter with *Hold to compare*, and
+  the preset chips — and still opens inside Chrome's 600 px cap; the smoke run
+  measures it in the tallest front state, and `popup-shot.mjs` reveals the live
+  row when it measures.
+
 - **The privacy policy now matches the code, line by line.** Two settings had
   shipped without a line in it — `images` and `darkMode` — and the
   description of the per-tab session record listed four fields where the code
@@ -511,6 +614,9 @@ follow [semver](https://semver.org/).
   unchanged at 0.714 → 0.533.
 
 ### Removed
+
+- **The silence probe** — `PROBE_TICKS`, the `AnalyserNode` tap and its buffer —
+  from the audio engine. See *Changed*.
 
 - **Page colour.** It pulled the whole document towards grey on a `saturate()`
   riding the picture slider. Dark mode already does what it was for, more

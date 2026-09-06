@@ -107,6 +107,17 @@ export class ImageEngine {
     this.filter.setExtraFilters(css);
   }
 
+  /**
+   * Compare: take the curve off every picture while the popup's button is
+   * held, and put it back when it is released. The rule keeps whatever the
+   * page treatment needs it to carry, so a held Compare on an inverted page
+   * shows the pictures as the site sent them rather than as negatives.
+   */
+  setHold(held: boolean): void {
+    if (this.destroyed) return;
+    this.filter.setBypass(held);
+  }
+
   getStatus(): ImageEngineStatus {
     return {
       active: this.enabled,
