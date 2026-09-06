@@ -2063,7 +2063,21 @@ async function main() {
       return top && top.mediaElements > 0 ? key : false;
     });
 
-    const notYet = await readStatus(crossKey);
+    /* Waited for, not read once. The first report a tab sends can carry the media
+       count before the engines have taken their settings — on a slow runner the
+       registry finds the element, the reporter fires, and `setParams` lands a
+       moment later — so a single read races the 1 s report throttle and comes back
+       `off`. What is being checked is where the status settles, and it settles
+       within a report or two. */
+    let notYet = await readStatus(crossKey);
+    await waitFor(
+      'the paused player reports as waiting',
+      async () => {
+        notYet = await readStatus(crossKey);
+        return notYet?.audio.state === 'idle' && notYet?.video.mode === 'idle';
+      },
+      { timeout: 8_000, interval: 300 },
+    ).catch(() => undefined);
     check(
       'a player that has not started reads as waiting, not as nothing to do',
       notYet?.audio.state === 'idle' && notYet?.video.mode === 'idle',
